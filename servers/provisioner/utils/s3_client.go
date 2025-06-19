@@ -53,8 +53,13 @@ type BucketParameters struct {
 	BucketTags *s3.Tagging
 }
 
+// LoggerKeyType is a custom type for context keys to avoid collisions
+// See: https://staticcheck.io/docs/checks/#SA1029
+
+type LoggerKeyType string
+
 // Logger key to extract logger from context
-const LoggerKey = "loggerKey"
+const LoggerKey LoggerKeyType = "loggerKey"
 
 // Create a new S3 client
 func NewS3Client(ctx context.Context, accessKey string, secretKey string, endpoint string) (*S3Client, error) {

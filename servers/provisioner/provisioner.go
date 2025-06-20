@@ -4,15 +4,19 @@
 package provisioner
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"strings"
 
 	"hpe-cosi-osp/iam"
 	"hpe-cosi-osp/servers/provisioner/utils"
 
-	"github.com/aws/aws-sdk-go/aws/endpoints"
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -79,14 +83,27 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 	// Get the parameters from the request
 	param := req.Parameters
 
-	// Create the s3 client
-	s3c, err := createS3Client(ctx, param, s.K8sClientset)
+	// Create the Homefleet client
+	hfc, err := createHomefleetClient(ctx, param, s.K8sClientset)
 	if err != nil {
 		return nil, err
 	}
 
+	// Get the versioning parameter from the request (case-insensitive)
+	versioning := "Disabled" // default to Disabled
+	for k, v := range param {
+		if strings.ToLower(k) == "versioning" && strings.ToLower(v) == "enabled" {
+			versioning = "Enabled"
+		}
+	}
+
+	bucketReq := BucketRequest{
+		Compression: true, // or get from param if needed
+		Versioning:  versioning,
+	}
+	// Do NOT set Versioning at all if not enabled
 	// Attempt bucket creation
-	if err = s3c.CreateBucket(ctx, bucketName, param); err != nil {
+	if err = hfc.CreateBucket(ctx, bucketName, bucketReq); err != nil {
 		return nil, status.Error(codes.Internal, "failed to create bucket due to an internal error")
 	}
 
@@ -115,14 +132,14 @@ func (s *Server) DriverDeleteBucket(ctx context.Context, req *cosi.DriverDeleteB
 	// Get the parameters from the spec of the bucket
 	param := bucket.Spec.Parameters
 
-	// Create the s3 client
-	s3c, err := createS3Client(ctx, param, s.K8sClientset)
+	// Create the Homefleet client
+	hfc, err := createHomefleetClient(ctx, param, s.K8sClientset)
 	if err != nil {
 		return nil, err
 	}
 
 	// Attempt bucket deletion
-	if err = s3c.DeleteBucket(ctx, bucketName); err != nil {
+	if err = hfc.DeleteBucket(ctx, bucketName); err != nil {
 		return nil, status.Error(codes.Internal, "failed to delete bucket due to an internal error")
 	}
 
@@ -192,7 +209,7 @@ func (s *Server) DriverGrantBucketAccess(ctx context.Context, req *cosi.DriverGr
 	userDetails["accessKeyID"] = userName
 	userDetails["accessSecretKey"] = secretKey
 	userDetails["endpoint"] = endpoint
-	userDetails["region"] = endpoints.UsEast1RegionID
+	userDetails["region"] = "us-east-1"
 
 	s.log.Info("Preparing s3 - COSI CredentialDetails map")
 	cred := &cosi.CredentialDetails{
@@ -257,31 +274,139 @@ func (s *Server) DriverRevokeBucketAccess(ctx context.Context, req *cosi.DriverR
 
 }
 
-// Create s3 client using the secret data
-func createS3Client(ctx context.Context, parameters map[string]string, kcs *kubernetes.Clientset) (*utils.S3Client, error) {
-	log := utils.GetLoggerFromContext(ctx)
-	// If either the secret's name or namespace is empty, return
-	// Retrieve the secret name and namespace
+// BucketRequest is the payload for creating a bucket with versioning and other options.
+type BucketRequest struct {
+	Compression bool   `json:"Compression"`
+	Versioning  string `json:"Versioning"`
+}
+
+// --- Add new structs for Homefleet bucket creation ---
+type SpaceQuota struct {
+	QuotaType     string `json:"QuotaType"`
+	QuotaLimitMiB int    `json:"QuotaLimitMiB"`
+}
+
+type CreateBucketRequest struct {
+	LocationConstraint string     `json:"LocationConstraint"`
+	Compression        bool       `json:"Compression"`
+	BucketPolicy       string     `json:"BucketPolicy"`
+	Versioning         string     `json:"Versioning"`
+	SpaceQuota         SpaceQuota `json:"SpaceQuota"`
+}
+
+// HomefleetClient is a client for direct REST API calls to the homefleet backend for S3 bucket operations.
+type HomefleetClient struct {
+	BaseURL    string
+	HTTPClient *http.Client
+	AccessKey  string
+	SecretKey  string
+}
+
+// CreateBucket creates a bucket with versioning enabled via direct REST API call.
+func (c *HomefleetClient) CreateBucket(ctx context.Context, bucketName string, req BucketRequest) error {
+	var logger logr.Logger
+	if l, ok := ctx.Value(utils.LoggerKey).(*logr.Logger); ok && l != nil {
+		logger = *l
+	}
+
+	url := fmt.Sprintf("%s/%s", c.BaseURL, bucketName)
+
+	// Build the Homefleet JSON payload
+	payloadStruct := CreateBucketRequest{
+		LocationConstraint: "homefleet",
+		Compression:        req.Compression,
+		BucketPolicy:       "",
+		Versioning:         req.Versioning,
+		SpaceQuota: SpaceQuota{
+			QuotaType:     "Soft",
+			QuotaLimitMiB: 1024,
+		},
+	}
+	payload, err := json.Marshal(payloadStruct)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to marshal bucket request payload", "bucketName", bucketName, "payload", payloadStruct)
+		}
+		return err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewBuffer(payload))
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to create HTTP request", "bucketName", bucketName)
+		}
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Sign the request using AWS Signature Version 4 (AWS4-HMAC-SHA256)
+	region := "homefleet" // Use Homefleet as the region for SigV4 signing
+	service := "s3"
+	err = utils.SignAWSV4(httpReq, c.AccessKey, c.SecretKey, region, service, payload)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to sign request with AWS4-HMAC-SHA256", "bucketName", bucketName)
+		}
+		return err
+	}
+	httpReq.Body = io.NopCloser(bytes.NewReader(payload))
+	httpReq.ContentLength = int64(len(payload))
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "HTTP request to create bucket failed", "bucketName", bucketName, "url", url)
+		}
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		if logger.GetSink() != nil {
+			logger.Error(fmt.Errorf("unexpected status code: %d", resp.StatusCode), "Failed to create bucket", "bucketName", bucketName, "status", resp.StatusCode, "response", string(body), "payload", string(payload), "url", url)
+		}
+		return fmt.Errorf("failed to create bucket: %s", string(body))
+	}
+	return nil
+}
+
+// DeleteBucket deletes a bucket via direct REST API call.
+func (c *HomefleetClient) DeleteBucket(ctx context.Context, bucketName string) error {
+	url := fmt.Sprintf("%s/%s", c.BaseURL, bucketName)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return err
+	}
+	httpReq.SetBasicAuth(c.AccessKey, c.SecretKey)
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to delete bucket: %s", string(body))
+	}
+	return nil
+}
+
+// Helper to create HomefleetClient using secret data
+func createHomefleetClient(ctx context.Context, parameters map[string]string, kcs *kubernetes.Clientset) (*HomefleetClient, error) {
 	secretName, secretNamespace, err := getSecretNameAndNamespace(ctx, parameters)
 	if err != nil {
 		return nil, err
 	}
-
-	// Get the access key, secret key, and endpoint from the secret
 	accessKey, secretKey, endpoint, err := getDataFromSecret(ctx, secretName, secretNamespace, kcs)
 	if err != nil {
 		return nil, err
 	}
-
-	// Create the s3 client using package utils with the above data.
-	// This client will be used to create and delete buckets.
-	s3c, err := utils.NewS3Client(ctx, accessKey, secretKey, endpoint)
-	if err != nil {
-		log.Error(err, "failed to create new S3 client")
-		return nil, status.Error(codes.Internal, "failed to create new S3 client")
-	}
-
-	return s3c, nil
+	return &HomefleetClient{
+		BaseURL:    endpoint,
+		HTTPClient: &http.Client{},
+		AccessKey:  accessKey,
+		SecretKey:  secretKey,
+	}, nil
 }
 
 // Get the name and namespace of the secret
@@ -448,7 +573,7 @@ func createBucketAccess(ctx context.Context, userName, policyName, bucketName st
 			msg := "failed to create s3 access policy in DSCC."
 			log.Error(err, msg)
 			if err == nil {
-				err = fmt.Errorf("%s",msg)
+				err = fmt.Errorf("%s", msg)
 			}
 			return "", "", err
 
@@ -468,7 +593,7 @@ func createBucketAccess(ctx context.Context, userName, policyName, bucketName st
 		msg := "failure seen with applying policy to s3 user in DSCC."
 		log.Error(err, msg)
 		if err == nil {
-			err = fmt.Errorf("%s",msg)
+			err = fmt.Errorf("%s", msg)
 		}
 		return "", "", err
 	}
@@ -520,7 +645,7 @@ func deleteBucketAccess(ctx context.Context, userName, policyName, bucketName st
 			msg := "failed to delete s3 user in DSCC."
 			log.Error(err, msg)
 			if err == nil {
-				err = fmt.Errorf("%s",msg)
+				err = fmt.Errorf("%s", msg)
 			}
 			return err
 
@@ -550,7 +675,7 @@ func deleteBucketAccess(ctx context.Context, userName, policyName, bucketName st
 			msg := "failed to delete s3 access policy in DSCC."
 			log.Error(err, msg)
 			if err == nil {
-				err = fmt.Errorf("%s",msg)
+				err = fmt.Errorf("%s", msg)
 			}
 			return err
 

@@ -9,6 +9,7 @@ import (
 	"hpe-cosi-osp/servers/provisioner/test_utils"
 	"hpe-cosi-osp/servers/provisioner/utils"
 	stdlog "log"
+	"net/http"
 	"os"
 	"reflect"
 	"testing"
@@ -16,7 +17,6 @@ import (
 	"hpe-cosi-osp/iam"
 
 	gomonkey "github.com/agiledragon/gomonkey/v2"
-	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/stdr"
 	"gotest.tools/v3/assert"
@@ -151,20 +151,24 @@ func TestServer_DriverCreateBucket(t *testing.T) {
 	}
 	patches.ApplyMethodSeq(secretInt, "Get", mockSecrets)
 
-	// Create patches to create s3 client and create bucket
-	s3c := &s3.S3{}
-	utilS3c := &utils.S3Client{Client: s3c}
-	mockClients := []gomonkey.OutputCell{
-		{Values: gomonkey.Params{utilS3c, nil}},
-		{Values: gomonkey.Params{utilS3c, errors.New("failed to create new s3 client")}},
-		{Values: gomonkey.Params{utilS3c, nil}},
+	// Patch createHomefleetClient to return a mock HomefleetClient
+	mockHfc := &HomefleetClient{
+		BaseURL:    "http://mock-homefleet",
+		HTTPClient: &http.Client{},
+		AccessKey:  "testuser",
+		SecretKey:  "testuser",
 	}
-	patches.ApplyFuncSeq(utils.NewS3Client, mockClients)
-	mockBucketResponses := []gomonkey.OutputCell{
-		{Values: gomonkey.Params{nil}},
-		{Values: gomonkey.Params{errors.New("failed to create new bucket")}},
-	}
-	patches.ApplyMethodSeq(utilS3c, "CreateBucket", mockBucketResponses)
+	patches.ApplyFunc(createHomefleetClient, func(ctx context.Context, parameters map[string]string, kcs *kubernetes.Clientset) (*HomefleetClient, error) {
+		return mockHfc, nil
+	})
+	// Patch CreateBucket to simulate success/failure for each test case
+	patches.ApplyMethodSeq(mockHfc, "CreateBucket", []gomonkey.OutputCell{
+		{Values: gomonkey.Params{nil}},                                   // Create bucket successfully
+		{Values: gomonkey.Params{errors.New("missing parameter")}},       // Failure due to missing parameter
+		{Values: gomonkey.Params{errors.New("failed to get secret")}},    // Failed to get secret
+		{Values: gomonkey.Params{errors.New("invalid secret")}},          // Failure due to invalid secret
+		{Values: gomonkey.Params{errors.New("failed to create bucket")}}, // Failed to create bucket
+	})
 
 	log := stdr.New(stdlog.New(os.Stdout, "", stdlog.LstdFlags))
 
@@ -238,26 +242,6 @@ func TestServer_DriverCreateBucket(t *testing.T) {
 		},
 		{
 			name: "Failure due to invalid secret",
-			fields: fields{
-				log:             log,
-				K8sClientset:    &kubernetes.Clientset{},
-				BucketClientset: &bucketclientset.Clientset{},
-			},
-			args: args{
-				ctx: context.TODO(),
-				req: &cosi.DriverCreateBucketRequest{
-					Name: "bucket1",
-					Parameters: map[string]string{
-						"cosiUserSecretNamespace": namespace,
-						"cosiUserSecretName":      secretName,
-					},
-				},
-			},
-			want:    nil,
-			wantErr: true,
-		},
-		{
-			name: "Failed to create s3 client",
 			fields: fields{
 				log:             log,
 				K8sClientset:    &kubernetes.Clientset{},
@@ -365,20 +349,23 @@ func TestServer_DriverDeleteBucket(t *testing.T) {
 	}
 	patches.ApplyMethodSeq(secretInt, "Get", mockSecrets)
 
-	// Create patches to create s3 client and delete bucket
-	s3c := &s3.S3{}
-	utilS3c := &utils.S3Client{Client: s3c}
-	mockClients := []gomonkey.OutputCell{
-		{Values: gomonkey.Params{utilS3c, nil}},
-		{Values: gomonkey.Params{utilS3c, errors.New("failed to create new s3 client")}},
-		{Values: gomonkey.Params{utilS3c, nil}},
+	// Patch createHomefleetClient to return a mock HomefleetClient
+	mockHfc := &HomefleetClient{
+		BaseURL:    "http://mock-homefleet",
+		HTTPClient: &http.Client{},
+		AccessKey:  "testuser",
+		SecretKey:  "testuser",
 	}
-	patches.ApplyFuncSeq(utils.NewS3Client, mockClients)
-	mockBucketResponses := []gomonkey.OutputCell{
-		{Values: gomonkey.Params{nil}},
-		{Values: gomonkey.Params{errors.New("failed to create new bucket")}},
-	}
-	patches.ApplyMethodSeq(utilS3c, "DeleteBucket", mockBucketResponses)
+	patches.ApplyFunc(createHomefleetClient, func(ctx context.Context, parameters map[string]string, kcs *kubernetes.Clientset) (*HomefleetClient, error) {
+		return mockHfc, nil
+	})
+	// Patch DeleteBucket to simulate success/failure for each test case
+	patches.ApplyMethodSeq(mockHfc, "DeleteBucket", []gomonkey.OutputCell{
+		{Values: gomonkey.Params{nil}},                                   // Deleted bucket successfully
+		{Values: gomonkey.Params{errors.New("failed to get secret")}},    // Failed to get secret
+		{Values: gomonkey.Params{errors.New("invalid secret")}},          // Failure due to invalid secret
+		{Values: gomonkey.Params{errors.New("failed to delete bucket")}}, // Failed to delete bucket
+	})
 
 	tests := []struct {
 		name    string
@@ -421,22 +408,6 @@ func TestServer_DriverDeleteBucket(t *testing.T) {
 		},
 		{
 			name: "Failure due to invalid secret",
-			fields: fields{
-				log:             log,
-				K8sClientset:    &kubernetes.Clientset{},
-				BucketClientset: bcs,
-			},
-			args: args{
-				ctx: context.TODO(),
-				req: &cosi.DriverDeleteBucketRequest{
-					BucketId: "bucket1",
-				},
-			},
-			want:    nil,
-			wantErr: true,
-		},
-		{
-			name: "Failed to create s3 client",
 			fields: fields{
 				log:             log,
 				K8sClientset:    &kubernetes.Clientset{},

@@ -74,7 +74,7 @@ func main() {
 	ctx = context.WithValue(ctx, utils.LoggerKey, &log)
 
 	// Get notified when an interrupt or termination signal is received
-	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	_, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	// Create the identity and provisioner servers for the driver
@@ -129,6 +129,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Set permissions to 0666 for the socket file so sidecar can access it
+	if err := os.Chmod(url.Path, 0666); err != nil {
+		log.Error(err, "failed to set permissions on socket file", "path", url.Path)
+		os.Exit(1)
+	}
+
 	// Start serving requests on the socket
 	err = server.Serve(lis)
 	if err != nil {
@@ -140,7 +146,7 @@ func main() {
 
 // grpcServer creates a new gRPC server, registers the COSI identity and provisioner servers, and returns the server instance.
 func grpcServer(
-	identity cosi.IdentityServer, 
+	identity cosi.IdentityServer,
 	provisioner cosi.ProvisionerServer,
 	grpcOptions []grpc.ServerOption,
 ) (*grpc.Server, error) {

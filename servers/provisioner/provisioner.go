@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +27,11 @@ import (
 	"k8s.io/client-go/rest"
 	bucketclientset "sigs.k8s.io/container-object-storage-interface/client/clientset/versioned"
 	cosi "sigs.k8s.io/container-object-storage-interface/proto"
+)
+
+const (
+	VersioningEnabled  = "Enabled"
+	VersioningDisabled = "Disabled"
 )
 
 // Server implements cosi.ProvisionerServer interface.
@@ -90,21 +96,58 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 	}
 
 	// Get the versioning parameter from the request (case-insensitive)
-	versioning := "Disabled" // default to Disabled
+	versioning := VersioningDisabled // default to Disabled
 	for k, v := range param {
-		if strings.ToLower(k) == "versioning" && strings.ToLower(v) == "enabled" {
-			versioning = "Enabled"
+		if strings.EqualFold(k, "versioning") && strings.EqualFold(v, VersioningEnabled) {
+			versioning = VersioningEnabled
 		}
 	}
 
+	// Parse object lock parameters
+	objectLockEnabled := ""
+	objectLockMode := ""
+	objectLockDays := 0
+	objectLockYears := 0
+	for k, v := range param {
+		switch strings.ToLower(k) {
+		case "objectlockenabled":
+			if strings.EqualFold(v, VersioningEnabled) {
+				objectLockEnabled = VersioningEnabled
+			}
+		case "objectlockmode":
+			objectLockMode = v
+		case "objectlockdays":
+			fmt.Sscanf(v, "%d", &objectLockDays)
+		case "objectlockyears":
+			fmt.Sscanf(v, "%d", &objectLockYears)
+		}
+	}
+
+	// Enforce: object locking only allowed if versioning is enabled
+	if objectLockEnabled == VersioningEnabled && versioning != VersioningEnabled {
+		return nil, status.Error(codes.InvalidArgument, "Object locking requires versioning to be enabled.")
+	}
+
 	bucketReq := BucketRequest{
-		Compression: true, // or get from param if needed
-		Versioning:  versioning,
+		Compression:       true, // or get from param if needed
+		Versioning:        versioning,
+		ObjectLockEnabled: objectLockEnabled,
+		ObjectLockMode:    objectLockMode,
+		ObjectLockDays:    objectLockDays,
+		ObjectLockYears:   objectLockYears,
 	}
 	// Do NOT set Versioning at all if not enabled
 	// Attempt bucket creation
 	if err = hfc.CreateBucket(ctx, bucketName, bucketReq); err != nil {
 		return nil, status.Error(codes.Internal, "failed to create bucket due to an internal error")
+	}
+
+	// If object locking is enabled, set object lock configuration
+	if objectLockEnabled == VersioningEnabled {
+		err = hfc.SetObjectLockConfiguration(ctx, bucketName, objectLockEnabled, objectLockMode, objectLockDays, objectLockYears)
+		if err != nil {
+			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to set object lock configuration: %v", err))
+		}
 	}
 
 	return &cosi.DriverCreateBucketResponse{
@@ -276,8 +319,12 @@ func (s *Server) DriverRevokeBucketAccess(ctx context.Context, req *cosi.DriverR
 
 // BucketRequest is the payload for creating a bucket with versioning and other options.
 type BucketRequest struct {
-	Compression bool   `json:"Compression"`
-	Versioning  string `json:"Versioning"`
+	Compression       bool   `json:"Compression"`
+	Versioning        string `json:"Versioning,omitempty"`
+	ObjectLockEnabled string `json:"ObjectLockEnabled,omitempty"`
+	ObjectLockMode    string `json:"ObjectLockMode,omitempty"`
+	ObjectLockDays    int    `json:"ObjectLockDays,omitempty"`
+	ObjectLockYears   int    `json:"ObjectLockYears,omitempty"`
 }
 
 // --- Add new structs for Homefleet bucket creation ---
@@ -290,8 +337,30 @@ type CreateBucketRequest struct {
 	LocationConstraint string     `json:"LocationConstraint"`
 	Compression        bool       `json:"Compression"`
 	BucketPolicy       string     `json:"BucketPolicy"`
-	Versioning         string     `json:"Versioning"`
+	Versioning         string     `json:"Versioning,omitempty"`
+	ObjectLockEnabled  string     `json:"ObjectLockEnabled,omitempty"`
+	ObjectLockMode     string     `json:"ObjectLockMode,omitempty"`
+	ObjectLockDays     int        `json:"ObjectLockDays,omitempty"`
+	ObjectLockYears    int        `json:"ObjectLockYears,omitempty"`
 	SpaceQuota         SpaceQuota `json:"SpaceQuota"`
+}
+
+// ObjectLockConfiguration represents the XML structure for object lock configuration
+type ObjectLockConfiguration struct {
+	XMLName           xml.Name        `xml:"ObjectLockConfiguration"`
+	Xmlns             string          `xml:"xmlns,attr"`
+	ObjectLockEnabled string          `xml:"ObjectLockEnabled"`
+	Rule              *ObjectLockRule `xml:"Rule,omitempty"`
+}
+
+type ObjectLockRule struct {
+	DefaultRetention ObjectLockDefaultRetention `xml:"DefaultRetention"`
+}
+
+type ObjectLockDefaultRetention struct {
+	Mode  string `xml:"Mode,omitempty"`
+	Days  int    `xml:"Days,omitempty"`
+	Years int    `xml:"Years,omitempty"`
 }
 
 // HomefleetClient is a client for direct REST API calls to the homefleet backend for S3 bucket operations.
@@ -387,6 +456,76 @@ func (c *HomefleetClient) DeleteBucket(ctx context.Context, bucketName string) e
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("failed to delete bucket: %s", string(body))
+	}
+	return nil
+}
+
+// SetObjectLockConfiguration sends a PUT request to set object lock config on a bucket.
+func (c *HomefleetClient) SetObjectLockConfiguration(ctx context.Context, bucketName, enabled, mode string, days, years int) error {
+	var logger logr.Logger
+	if l, ok := ctx.Value(utils.LoggerKey).(*logr.Logger); ok && l != nil {
+		logger = *l
+	}
+
+	url := fmt.Sprintf("%s/%s?object-lock", c.BaseURL, bucketName)
+	config := ObjectLockConfiguration{
+		Xmlns:             "http://s3.amazonaws.com/doc/2006-03-01/",
+		ObjectLockEnabled: enabled,
+	}
+	if mode != "" || days > 0 || years > 0 {
+		config.Rule = &ObjectLockRule{
+			DefaultRetention: ObjectLockDefaultRetention{
+				Mode:  mode,
+				Days:  days,
+				Years: years,
+			},
+		}
+	}
+	body, err := xml.Marshal(config)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to marshal object lock XML", "bucketName", bucketName)
+		}
+		return err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewBuffer(body))
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to create object lock HTTP request", "bucketName", bucketName)
+		}
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/xml")
+
+	// Sign the request using AWS Signature Version 4 (AWS4-HMAC-SHA256)
+	region := "homefleet"
+	service := "s3"
+	err = utils.SignAWSV4(httpReq, c.AccessKey, c.SecretKey, region, service, body)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to sign object lock request", "bucketName", bucketName)
+		}
+		return err
+	}
+	httpReq.Body = io.NopCloser(bytes.NewReader(body))
+	httpReq.ContentLength = int64(len(body))
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "HTTP request to set object lock failed", "bucketName", bucketName, "url", url)
+		}
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		if logger.GetSink() != nil {
+			logger.Error(fmt.Errorf("unexpected status code: %d", resp.StatusCode), "Failed to set object lock", "bucketName", bucketName, "status", resp.StatusCode, "response", string(respBody), "url", url)
+		}
+		return fmt.Errorf("failed to set object lock: %s", string(respBody))
 	}
 	return nil
 }

@@ -32,6 +32,7 @@ import (
 const (
 	VersioningEnabled  = "Enabled"
 	VersioningDisabled = "Disabled"
+	HomefleetRegion    = "homefleet"
 )
 
 // Server implements cosi.ProvisionerServer interface.
@@ -95,33 +96,11 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 		return nil, err
 	}
 
-	// Get the versioning parameter from the request (case-insensitive)
-	versioning := VersioningDisabled // default to Disabled
-	for k, v := range param {
-		if strings.EqualFold(k, "versioning") && strings.EqualFold(v, VersioningEnabled) {
-			versioning = VersioningEnabled
-		}
-	}
-
-	// Parse object lock parameters
-	objectLockEnabled := ""
-	objectLockMode := ""
-	objectLockDays := 0
-	objectLockYears := 0
-	for k, v := range param {
-		switch strings.ToLower(k) {
-		case "objectlockenabled":
-			if strings.EqualFold(v, VersioningEnabled) {
-				objectLockEnabled = VersioningEnabled
-			}
-		case "objectlockmode":
-			objectLockMode = v
-		case "objectlockdays":
-			fmt.Sscanf(v, "%d", &objectLockDays)
-		case "objectlockyears":
-			fmt.Sscanf(v, "%d", &objectLockYears)
-		}
-	}
+	// --- Modular parameter parsing ---
+	versioning := parseVersioning(param)
+	compression := parseCompression(param)
+	objectLockEnabled, objectLockMode, objectLockDays, objectLockYears := parseObjectLock(param)
+	tags := parseBucketTags(param)
 
 	// Enforce: object locking only allowed if versioning is enabled
 	if objectLockEnabled == VersioningEnabled && versioning != VersioningEnabled {
@@ -129,14 +108,14 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 	}
 
 	bucketReq := BucketRequest{
-		Compression:       true, // or get from param if needed
+		Compression:       compression,
 		Versioning:        versioning,
 		ObjectLockEnabled: objectLockEnabled,
 		ObjectLockMode:    objectLockMode,
 		ObjectLockDays:    objectLockDays,
 		ObjectLockYears:   objectLockYears,
 	}
-	// Do NOT set Versioning at all if not enabled
+
 	// Attempt bucket creation
 	if err = hfc.CreateBucket(ctx, bucketName, bucketReq); err != nil {
 		return nil, status.Error(codes.Internal, "failed to create bucket due to an internal error")
@@ -147,6 +126,14 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 		err = hfc.SetObjectLockConfiguration(ctx, bucketName, objectLockEnabled, objectLockMode, objectLockDays, objectLockYears)
 		if err != nil {
 			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to set object lock configuration: %v", err))
+		}
+	}
+
+	// If tags are present, set bucket tags
+	if len(tags) > 0 {
+		err = hfc.PutBucketTagging(ctx, bucketName, tags)
+		if err != nil {
+			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to set bucket tags: %v", err))
 		}
 	}
 
@@ -380,16 +367,21 @@ func (c *HomefleetClient) CreateBucket(ctx context.Context, bucketName string, r
 
 	url := fmt.Sprintf("%s/%s", c.BaseURL, bucketName)
 
-	// Build the Homefleet JSON payload
-	payloadStruct := CreateBucketRequest{
-		LocationConstraint: "homefleet",
-		Compression:        req.Compression,
-		BucketPolicy:       "",
-		Versioning:         req.Versioning,
-		SpaceQuota: SpaceQuota{
-			QuotaType:     "Soft",
-			QuotaLimitMiB: 1024,
-		},
+	// Build the Homefleet JSON payload (minimal for COSI)
+	payloadStruct := struct {
+		Compression       bool   `json:"Compression"`
+		Versioning        string `json:"Versioning,omitempty"`
+		ObjectLockEnabled string `json:"ObjectLockEnabled,omitempty"`
+		ObjectLockMode    string `json:"ObjectLockMode,omitempty"`
+		ObjectLockDays    int    `json:"ObjectLockDays,omitempty"`
+		ObjectLockYears   int    `json:"ObjectLockYears,omitempty"`
+	}{
+		Compression:       req.Compression,
+		Versioning:        req.Versioning,
+		ObjectLockEnabled: req.ObjectLockEnabled,
+		ObjectLockMode:    req.ObjectLockMode,
+		ObjectLockDays:    req.ObjectLockDays,
+		ObjectLockYears:   req.ObjectLockYears,
 	}
 	payload, err := json.Marshal(payloadStruct)
 	if err != nil {
@@ -409,7 +401,7 @@ func (c *HomefleetClient) CreateBucket(ctx context.Context, bucketName string, r
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	// Sign the request using AWS Signature Version 4 (AWS4-HMAC-SHA256)
-	region := "homefleet" // Use Homefleet as the region for SigV4 signing
+	region := HomefleetRegion // Use HomefleetRegion constant for SigV4 signing
 	service := "s3"
 	err = utils.SignAWSV4(httpReq, c.AccessKey, c.SecretKey, region, service, payload)
 	if err != nil {
@@ -499,7 +491,7 @@ func (c *HomefleetClient) SetObjectLockConfiguration(ctx context.Context, bucket
 	httpReq.Header.Set("Content-Type", "application/xml")
 
 	// Sign the request using AWS Signature Version 4 (AWS4-HMAC-SHA256)
-	region := "homefleet"
+	region := HomefleetRegion
 	service := "s3"
 	err = utils.SignAWSV4(httpReq, c.AccessKey, c.SecretKey, region, service, body)
 	if err != nil {
@@ -526,6 +518,149 @@ func (c *HomefleetClient) SetObjectLockConfiguration(ctx context.Context, bucket
 			logger.Error(fmt.Errorf("unexpected status code: %d", resp.StatusCode), "Failed to set object lock", "bucketName", bucketName, "status", resp.StatusCode, "response", string(respBody), "url", url)
 		}
 		return fmt.Errorf("failed to set object lock: %s", string(respBody))
+	}
+	return nil
+}
+
+// --- Modular parameter parsing helpers ---
+func parseVersioning(param map[string]string) string {
+	for k, v := range param {
+		if strings.EqualFold(k, "versioning") && strings.EqualFold(v, VersioningEnabled) {
+			return VersioningEnabled
+		}
+	}
+	return VersioningDisabled
+}
+
+func parseCompression(param map[string]string) bool {
+	for k, v := range param {
+		if strings.EqualFold(k, "compression") {
+			return strings.EqualFold(v, "true") || v == "1"
+		}
+	}
+	return false // default to false if not specified
+}
+
+func parseObjectLock(param map[string]string) (enabled, mode string, days, years int) {
+	for k, v := range param {
+		switch strings.ToLower(k) {
+		case "objectlockenabled":
+			if strings.EqualFold(v, VersioningEnabled) {
+				enabled = VersioningEnabled
+			}
+		case "objectlockmode":
+			mode = v
+		case "objectlockdays":
+			fmt.Sscanf(v, "%d", &days)
+		case "objectlockyears":
+			fmt.Sscanf(v, "%d", &years)
+		}
+	}
+	return
+}
+
+func parseBucketTags(param map[string]string) map[string]string {
+	tags := make(map[string]string)
+	// Support legacy tag:key and new bucketTags parameter
+	for k, v := range param {
+		if strings.HasPrefix(strings.ToLower(k), "tag:") {
+			tagKey := strings.TrimPrefix(k, "tag:")
+			tags[tagKey] = v
+		}
+	}
+	if tagString, ok := param["bucketTags"]; ok {
+		pairs := strings.Split(tagString, ",")
+		for _, pair := range pairs {
+			pair = strings.TrimSpace(pair)
+			if pair == "" {
+				continue
+			}
+			if strings.Contains(pair, "=") {
+				kv := strings.SplitN(pair, "=", 2)
+				key := strings.TrimSpace(kv[0])
+				val := strings.TrimSpace(kv[1])
+				if key != "" {
+					tags[key] = val
+				}
+			} else {
+				// key only, value is empty
+				tags[pair] = ""
+			}
+		}
+	}
+	return tags
+}
+
+// --- Add PutBucketTagging to HomefleetClient ---
+func (c *HomefleetClient) PutBucketTagging(ctx context.Context, bucketName string, tags map[string]string) error {
+	var logger logr.Logger
+	if l, ok := ctx.Value(utils.LoggerKey).(*logr.Logger); ok && l != nil {
+		logger = *l
+	}
+
+	type Tag struct {
+		Key   string `xml:"Key"`
+		Value string `xml:"Value"`
+	}
+	type TagSet struct {
+		Tags []Tag `xml:"Tag"`
+	}
+	type Tagging struct {
+		XMLName xml.Name `xml:"Tagging"`
+		TagSet  TagSet   `xml:"TagSet"`
+	}
+
+	tagList := make([]Tag, 0, len(tags))
+	for k, v := range tags {
+		tagList = append(tagList, Tag{Key: k, Value: v})
+	}
+	tagging := Tagging{TagSet: TagSet{Tags: tagList}}
+	body, err := xml.Marshal(tagging)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to marshal bucket tags XML", "bucketName", bucketName)
+		}
+		return err
+	}
+
+	url := fmt.Sprintf("%s/%s?tagging", c.BaseURL, bucketName)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewBuffer(body))
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to create bucket tagging HTTP request", "bucketName", bucketName)
+		}
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/xml")
+
+	// Sign the request using AWS Signature Version 4 (AWS4-HMAC-SHA256)
+	region := HomefleetRegion
+	service := "s3"
+	err = utils.SignAWSV4(httpReq, c.AccessKey, c.SecretKey, region, service, body)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to sign bucket tagging request", "bucketName", bucketName)
+		}
+		return err
+	}
+	httpReq.Body = io.NopCloser(bytes.NewReader(body))
+	httpReq.ContentLength = int64(len(body))
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "HTTP request to set bucket tags failed", "bucketName", bucketName, "url", url)
+		}
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		if logger.GetSink() != nil {
+			logger.Error(fmt.Errorf("unexpected status code: %d", resp.StatusCode), "Failed to set bucket tags", "bucketName", bucketName, "status", resp.StatusCode, "response", string(respBody), "url", url)
+		}
+		return fmt.Errorf("failed to set bucket tags: %s", string(respBody))
 	}
 	return nil
 }

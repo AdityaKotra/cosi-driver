@@ -151,18 +151,18 @@ func TestServer_DriverCreateBucket(t *testing.T) {
 	}
 	patches.ApplyMethodSeq(secretInt, "Get", mockSecrets)
 
-	// Patch createHomefleetClient to return a mock HomefleetClient
-	mockHfc := &HomefleetClient{
-		BaseURL:    "http://mock-homefleet",
+	// Patch createS3Client to return a mock S3Client
+	mockS3c := &S3Client{
+		BaseURL:    "http://mock-s3",
 		HTTPClient: &http.Client{},
 		AccessKey:  "testuser",
 		SecretKey:  "testuser",
 	}
-	patches.ApplyFunc(createHomefleetClient, func(ctx context.Context, parameters map[string]string, kcs *kubernetes.Clientset) (*HomefleetClient, error) {
-		return mockHfc, nil
+	patches.ApplyFunc(createS3Client, func(ctx context.Context, parameters map[string]string, kcs *kubernetes.Clientset) (*S3Client, error) {
+		return mockS3c, nil
 	})
 	// Patch CreateBucket to simulate success/failure for each test case
-	patches.ApplyMethodSeq(mockHfc, "CreateBucket", []gomonkey.OutputCell{
+	patches.ApplyMethodSeq(mockS3c, "CreateBucket", []gomonkey.OutputCell{
 		{Values: gomonkey.Params{nil}},                                   // Create bucket successfully
 		{Values: gomonkey.Params{errors.New("missing parameter")}},       // Failure due to missing parameter
 		{Values: gomonkey.Params{errors.New("failed to get secret")}},    // Failed to get secret
@@ -349,18 +349,18 @@ func TestServer_DriverDeleteBucket(t *testing.T) {
 	}
 	patches.ApplyMethodSeq(secretInt, "Get", mockSecrets)
 
-	// Patch createHomefleetClient to return a mock HomefleetClient
-	mockHfc := &HomefleetClient{
-		BaseURL:    "http://mock-homefleet",
+	// Patch createS3Client to return a mock S3Client
+	mockS3c := &S3Client{
+		BaseURL:    "http://mock-s3",
 		HTTPClient: &http.Client{},
 		AccessKey:  "testuser",
 		SecretKey:  "testuser",
 	}
-	patches.ApplyFunc(createHomefleetClient, func(ctx context.Context, parameters map[string]string, kcs *kubernetes.Clientset) (*HomefleetClient, error) {
-		return mockHfc, nil
+	patches.ApplyFunc(createS3Client, func(ctx context.Context, parameters map[string]string, kcs *kubernetes.Clientset) (*S3Client, error) {
+		return mockS3c, nil
 	})
 	// Patch DeleteBucket to simulate success/failure for each test case
-	patches.ApplyMethodSeq(mockHfc, "DeleteBucket", []gomonkey.OutputCell{
+	patches.ApplyMethodSeq(mockS3c, "DeleteBucket", []gomonkey.OutputCell{
 		{Values: gomonkey.Params{nil}},                                   // Deleted bucket successfully
 		{Values: gomonkey.Params{errors.New("failed to get secret")}},    // Failed to get secret
 		{Values: gomonkey.Params{errors.New("invalid secret")}},          // Failure due to invalid secret

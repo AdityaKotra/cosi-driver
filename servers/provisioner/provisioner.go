@@ -547,10 +547,22 @@ func parseObjectLock(param map[string]string) (locking, retentionMode string, da
 			}
 		case "retentionmode":
 			retentionMode = v
-		case "objectlockdays":
-			fmt.Sscanf(v, "%d", &days)
-		case "objectlockyears":
-			fmt.Sscanf(v, "%d", &years)
+		case "defaultretentioninterval":
+			// Parse format like 1d, 1m, 1y
+			if len(v) > 1 {
+				numPart := v[:len(v)-1]
+				unit := v[len(v)-1]
+				var n int
+				fmt.Sscanf(numPart, "%d", &n)
+				switch unit {
+				case 'd':
+					days = n
+				case 'm':
+					days = n * 30 // treat 1m as 30 days
+				case 'y':
+					years = n
+				}
+			}
 		}
 	}
 	return

@@ -18,6 +18,8 @@ import (
 	"hpe-cosi-osp/iam"
 	"hpe-cosi-osp/servers/provisioner/utils"
 
+	"github.com/aws/aws-sdk-go/aws/endpoints"
+
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -29,9 +31,11 @@ import (
 	cosi "sigs.k8s.io/container-object-storage-interface/proto"
 )
 
+type Feature string
+
 const (
-	FeatureEnabled  = "Enabled"
-	FeatureDisabled = "Disabled"
+	FeatureEnabled  Feature = "Enabled"
+	FeatureDisabled Feature = "Disabled"
 )
 
 // Server implements cosi.ProvisionerServer interface.
@@ -102,11 +106,11 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 	tags := parseBucketTags(param)
 
 	// Enforce: object locking only allowed if versioning is enabled
-	if locking == FeatureEnabled && versioning != FeatureEnabled {
+	if locking == string(FeatureEnabled) && versioning != string(FeatureEnabled) {
 		return nil, status.Error(codes.InvalidArgument, "Object locking requires versioning to be enabled.")
 	}
 
-	bucketReq := BucketRequest{
+	bucketReq := utils.BucketRequest{
 		Compression:     compression,
 		Versioning:      versioning,
 		Locking:         locking,
@@ -115,16 +119,22 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 		ObjectLockYears: objectLockYears,
 	}
 
-	// Attempt bucket creation
+
+	// Attempt bucket creation (idempotent: handle "already exists" inside CreateBucket)
 	if err = s3c.CreateBucket(ctx, bucketName, bucketReq); err != nil {
+		// If CreateBucket returns an "already exists" error, return ALREADY_EXISTS code
+		if strings.Contains(err.Error(), "already exists") {
+			return nil, status.Error(codes.AlreadyExists, "bucket already exists with different parameters")
+		}
 		return nil, status.Error(codes.Internal, "failed to create bucket due to an internal error")
 	}
 
 	// If locking is enabled, set object lock configuration
-	if locking == FeatureEnabled {
+	if locking == string(FeatureEnabled) {
 		err = s3c.SetObjectLockConfiguration(ctx, bucketName, locking, retentionMode, objectLockDays, objectLockYears)
 		if err != nil {
-			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to set object lock configuration: %v", err))
+			s.log.Error(err, "failed to set object lock configuration")
+			return nil, status.Error(codes.Internal, "failed to set object lock configuration")
 		}
 	}
 
@@ -132,7 +142,8 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 	if len(tags) > 0 {
 		err = s3c.PutBucketTagging(ctx, bucketName, tags)
 		if err != nil {
-			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to set bucket tags: %v", err))
+			s.log.Error(err, "failed to set bucket tags")
+			return nil, status.Error(codes.Internal, "failed to set bucket tags")
 		}
 	}
 
@@ -238,7 +249,7 @@ func (s *Server) DriverGrantBucketAccess(ctx context.Context, req *cosi.DriverGr
 	userDetails["accessKeyID"] = userName
 	userDetails["accessSecretKey"] = secretKey
 	userDetails["endpoint"] = endpoint
-	userDetails["region"] = "us-east-1"
+	userDetails["region"] = endpoints.UsEast1RegionID
 
 	s.log.Info("Preparing s3 - COSI CredentialDetails map")
 	cred := &cosi.CredentialDetails{
@@ -303,62 +314,8 @@ func (s *Server) DriverRevokeBucketAccess(ctx context.Context, req *cosi.DriverR
 
 }
 
-// BucketRequest is the payload for creating a bucket with versioning and other options.
-type BucketRequest struct {
-	Compression     bool   `json:"Compression"`
-	Versioning      string `json:"Versioning,omitempty"`
-	Locking         string `json:"Locking,omitempty"`
-	RetentionMode   string `json:"RetentionMode,omitempty"`
-	ObjectLockDays  int    `json:"ObjectLockDays,omitempty"`
-	ObjectLockYears int    `json:"ObjectLockYears,omitempty"`
-}
-
-// --- Add new structs for S3 bucket creation ---
-type SpaceQuota struct {
-	QuotaType     string `json:"QuotaType"`
-	QuotaLimitMiB int    `json:"QuotaLimitMiB"`
-}
-
-type CreateBucketRequest struct {
-	LocationConstraint string     `json:"LocationConstraint"`
-	Compression        bool       `json:"Compression"`
-	BucketPolicy       string     `json:"BucketPolicy"`
-	Versioning         string     `json:"Versioning,omitempty"`
-	ObjectLockEnabled  string     `json:"ObjectLockEnabled,omitempty"`
-	ObjectLockMode     string     `json:"ObjectLockMode,omitempty"`
-	ObjectLockDays     int        `json:"ObjectLockDays,omitempty"`
-	ObjectLockYears    int        `json:"ObjectLockYears,omitempty"`
-	SpaceQuota         SpaceQuota `json:"SpaceQuota"`
-}
-
-// ObjectLockConfiguration represents the XML structure for object lock configuration
-type ObjectLockConfiguration struct {
-	XMLName           xml.Name        `xml:"ObjectLockConfiguration"`
-	Xmlns             string          `xml:"xmlns,attr"`
-	ObjectLockEnabled string          `xml:"ObjectLockEnabled"`
-	Rule              *ObjectLockRule `xml:"Rule,omitempty"`
-}
-
-type ObjectLockRule struct {
-	DefaultRetention ObjectLockDefaultRetention `xml:"DefaultRetention"`
-}
-
-type ObjectLockDefaultRetention struct {
-	Mode  string `xml:"Mode,omitempty"`
-	Days  int    `xml:"Days,omitempty"`
-	Years int    `xml:"Years,omitempty"`
-}
-
-// S3Client is a client for direct REST API calls to the S3 backend for S3 bucket operations.
-type S3Client struct {
-	BaseURL    string
-	HTTPClient *http.Client
-	AccessKey  string
-	SecretKey  string
-}
-
 // CreateBucket creates a bucket with versioning enabled via direct REST API call.
-func (c *S3Client) CreateBucket(ctx context.Context, bucketName string, req BucketRequest) error {
+func (c *S3Client) CreateBucket(ctx context.Context, bucketName string, req utils.BucketRequest) error {
 	var logger logr.Logger
 	if l, ok := ctx.Value(utils.LoggerKey).(*logr.Logger); ok && l != nil {
 		logger = *l
@@ -458,13 +415,13 @@ func (c *S3Client) SetObjectLockConfiguration(ctx context.Context, bucketName, e
 	}
 
 	url := fmt.Sprintf("%s/%s?object-lock", c.BaseURL, bucketName)
-	config := ObjectLockConfiguration{
+	config := utils.ObjectLockConfiguration{
 		Xmlns:             "http://s3.amazonaws.com/doc/2006-03-01/",
 		ObjectLockEnabled: enabled,
 	}
 	if mode != "" || days > 0 || years > 0 {
-		config.Rule = &ObjectLockRule{
-			DefaultRetention: ObjectLockDefaultRetention{
+		config.Rule = &utils.ObjectLockRule{
+			DefaultRetention: utils.ObjectLockDefaultRetention{
 				Mode:  mode,
 				Days:  days,
 				Years: years,
@@ -522,17 +479,17 @@ func (c *S3Client) SetObjectLockConfiguration(ctx context.Context, bucketName, e
 // --- Modular parameter parsing helpers ---
 func parseVersioning(param map[string]string) string {
 	for k, v := range param {
-		if strings.EqualFold(k, "versioning") && strings.EqualFold(v, FeatureEnabled) {
-			return FeatureEnabled
+		if strings.EqualFold(k, "versioning") && strings.EqualFold(v, string(FeatureEnabled)) {
+			return string(FeatureEnabled)
 		}
 	}
-	return FeatureDisabled
+	return string(FeatureDisabled)
 }
 
 func parseCompression(param map[string]string) bool {
 	for k, v := range param {
 		if strings.EqualFold(k, "compression") {
-			return strings.EqualFold(v, FeatureEnabled)
+			return strings.EqualFold(v, string(FeatureEnabled))
 		}
 	}
 	return false // default to false if not specified
@@ -542,8 +499,8 @@ func parseObjectLock(param map[string]string) (locking, retentionMode string, da
 	for k, v := range param {
 		switch strings.ToLower(k) {
 		case "locking":
-			if strings.EqualFold(v, FeatureEnabled) {
-				locking = FeatureEnabled
+			if strings.EqualFold(v, string(FeatureEnabled)) {
+				locking = string(FeatureEnabled)
 			}
 		case "retentionmode":
 			retentionMode = v
@@ -974,4 +931,13 @@ func getAccessToken(credentials *utils.IAMCredentials, log *logr.Logger) (string
 	ts := iam.NewTokenService(credentials.GLCPCommonCloud, credentials.GLCPUser, credentials.GLCPUserSecretKey, credentials.Proxy, log)
 	token, err := ts.GetAccessToken()
 	return token, err
+}
+
+
+// S3Client is a client for direct REST API calls to the S3 backend for S3 bucket operations.
+type S3Client struct {
+	BaseURL    string
+	HTTPClient *http.Client
+	AccessKey  string
+	SecretKey  string
 }

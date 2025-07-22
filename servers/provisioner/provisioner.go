@@ -31,13 +31,6 @@ import (
 	cosi "sigs.k8s.io/container-object-storage-interface/proto"
 )
 
-type Feature string
-
-const (
-	FeatureEnabled  Feature = "Enabled"
-	FeatureDisabled Feature = "Disabled"
-)
-
 // Server implements cosi.ProvisionerServer interface.
 type Server struct {
 	log             logr.Logger
@@ -106,7 +99,7 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 	tags := parseBucketTags(param)
 
 	// Enforce: object locking only allowed if versioning is enabled
-	if locking == string(FeatureEnabled) && versioning != string(FeatureEnabled) {
+	if locking == string(utils.FeatureEnabled) && versioning != string(utils.FeatureEnabled) {
 		return nil, status.Error(codes.InvalidArgument, "Object locking requires versioning to be enabled.")
 	}
 
@@ -119,7 +112,6 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 		ObjectLockYears: objectLockYears,
 	}
 
-
 	// Attempt bucket creation (idempotent: handle "already exists" inside CreateBucket)
 	if err = s3c.CreateBucket(ctx, bucketName, bucketReq); err != nil {
 		// If CreateBucket returns an "already exists" error, return ALREADY_EXISTS code
@@ -130,7 +122,7 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 	}
 
 	// If locking is enabled, set object lock configuration
-	if locking == string(FeatureEnabled) {
+	if locking == string(utils.FeatureEnabled) {
 		err = s3c.SetObjectLockConfiguration(ctx, bucketName, locking, retentionMode, objectLockDays, objectLockYears)
 		if err != nil {
 			s.log.Error(err, "failed to set object lock configuration")
@@ -479,17 +471,17 @@ func (c *S3Client) SetObjectLockConfiguration(ctx context.Context, bucketName, e
 // --- Modular parameter parsing helpers ---
 func parseVersioning(param map[string]string) string {
 	for k, v := range param {
-		if strings.EqualFold(k, "versioning") && strings.EqualFold(v, string(FeatureEnabled)) {
-			return string(FeatureEnabled)
+		if strings.EqualFold(k, "versioning") && strings.EqualFold(v, string(utils.FeatureEnabled)) {
+			return string(utils.FeatureEnabled)
 		}
 	}
-	return string(FeatureDisabled)
+	return string(utils.FeatureDisabled)
 }
 
 func parseCompression(param map[string]string) bool {
 	for k, v := range param {
 		if strings.EqualFold(k, "compression") {
-			return strings.EqualFold(v, string(FeatureEnabled))
+			return strings.EqualFold(v, string(utils.FeatureEnabled))
 		}
 	}
 	return false // default to false if not specified
@@ -499,8 +491,8 @@ func parseObjectLock(param map[string]string) (locking, retentionMode string, da
 	for k, v := range param {
 		switch strings.ToLower(k) {
 		case "locking":
-			if strings.EqualFold(v, string(FeatureEnabled)) {
-				locking = string(FeatureEnabled)
+			if strings.EqualFold(v, string(utils.FeatureEnabled)) {
+				locking = string(utils.FeatureEnabled)
 			}
 		case "retentionmode":
 			retentionMode = v
@@ -932,7 +924,6 @@ func getAccessToken(credentials *utils.IAMCredentials, log *logr.Logger) (string
 	token, err := ts.GetAccessToken()
 	return token, err
 }
-
 
 // S3Client is a client for direct REST API calls to the S3 backend for S3 bucket operations.
 type S3Client struct {

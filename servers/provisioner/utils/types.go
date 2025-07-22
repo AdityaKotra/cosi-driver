@@ -32,7 +32,6 @@ type IAMCredentials struct {
 	Proxy             string
 }
 
-
 // Defines BucketRequest structure with options (Versioning, Locking, Compression)
 type BucketRequest struct {
 	Compression     bool   `json:"Compression"`
@@ -78,3 +77,11 @@ type ObjectLockDefaultRetention struct {
 	Days  int    `xml:"Days,omitempty"`
 	Years int    `xml:"Years,omitempty"`
 }
+
+// Feature represents a feature toggle.
+type Feature string
+
+const (
+	FeatureEnabled  Feature = "Enabled"
+	FeatureDisabled Feature = "Disabled"
+)

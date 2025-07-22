@@ -1,6 +1,6 @@
 // © Copyright 2024 Hewlett Packard Enterprise Development LP
 
-// Package provisioner
+// Package provisioner implements the COSI ProvisionerServer interface.
 package provisioner
 
 import (
@@ -31,12 +31,20 @@ import (
 	cosi "sigs.k8s.io/container-object-storage-interface/proto"
 )
 
-// Server implements cosi.ProvisionerServer interface.
+// Feature represents a feature toggle with enabled or disabled states.
+type Feature string
+
+const (
+	FeatureEnabled  Feature = "Enabled"  // Indicates that the feature is enabled.
+	FeatureDisabled Feature = "Disabled" // Indicates that the feature is disabled.
+)
+
+// Server implements the cosi.ProvisionerServer interface for bucket operations.
 type Server struct {
-	log             logr.Logger
-	K8sClientset    *kubernetes.Clientset
-	BucketClientset bucketclientset.Interface
-	cosi.UnimplementedProvisionerServer
+	log                                 logr.Logger               // Logger for logging messages.
+	K8sClientset                        *kubernetes.Clientset     // Kubernetes client for interacting with the cluster.
+	BucketClientset                     bucketclientset.Interface // Clientset for bucket operations.
+	cosi.UnimplementedProvisionerServer                           // Embeds unimplemented methods of the interface.
 }
 
 // Interface guards.
@@ -47,7 +55,7 @@ var (
 	errEmptySecretData       = errors.New("accessKey, secretKey and endpoint data are required in the secret")
 )
 
-// New returns provisioner.Server with default values.
+// New initializes and returns a new Server instance.
 func New(logger logr.Logger) (*Server, error) {
 	kubeConfig, err := rest.InClusterConfig()
 	if err != nil {
@@ -71,11 +79,8 @@ func New(logger logr.Logger) (*Server, error) {
 	}, nil
 }
 
-// DriverCreateBucket call is made to create the bucket in the backend.
-//
-// NOTE: this call needs to be idempotent.
-//  1. If a bucket that matches both name and parameters already exists, then OK (success) must be returned.
-//  2. If a bucket by same name, but different parameters is provided, then the appropriate error code ALREADY_EXISTS must be returned.
+// DriverCreateBucket handles the creation of a bucket in the backend.
+// This method ensures idempotency by checking for existing buckets with the same name and parameters.
 func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateBucketRequest) (*cosi.DriverCreateBucketResponse, error) {
 	s.log.Info("Received request to create bucket.", "bucketName", req.Name)
 	ctx = context.WithValue(ctx, utils.LoggerKey, &s.log)
@@ -144,10 +149,8 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 	}, nil
 }
 
-// DriverDeleteBucket call is made to delete the bucket in the backend.
-//
-// NOTE: this call needs to be idempotent.
-// If the bucket has already been deleted, then no error should be returned.
+// DriverDeleteBucket handles the deletion of a bucket in the backend.
+// This method ensures idempotency by not returning an error if the bucket is already deleted.
 func (s *Server) DriverDeleteBucket(ctx context.Context, req *cosi.DriverDeleteBucketRequest) (*cosi.DriverDeleteBucketResponse, error) {
 	s.log.Info("Received request to delete bucket.", "bucketName", req.BucketId)
 	ctx = context.WithValue(ctx, utils.LoggerKey, &s.log)
@@ -178,12 +181,8 @@ func (s *Server) DriverDeleteBucket(ctx context.Context, req *cosi.DriverDeleteB
 	return &cosi.DriverDeleteBucketResponse{}, nil
 }
 
-// DriverGrantBucketAccess call grants access to an account.
-// The account_name in the request shall be used as a unique identifier to create credentials.
-//
-// NOTE: this call needs to be idempotent.
-// The account_id returned in the response will be used as the unique identifier for deleting this access when calling DriverRevokeBucketAccess.
-// The returned secret does not need to be the same each call to achieve idempotency.
+// DriverGrantBucketAccess grants access to a bucket for a specific account.
+// The account_name in the request is used as a unique identifier to create credentials.
 func (s *Server) DriverGrantBucketAccess(ctx context.Context, req *cosi.DriverGrantBucketAccessRequest) (*cosi.DriverGrantBucketAccessResponse, error) {
 	s.log.Info("Received request to grant access to bucket.", "bucketName", req.BucketId, "AccountName", req.Name)
 	ctx = context.WithValue(ctx, utils.LoggerKey, &s.log)
@@ -257,9 +256,8 @@ func (s *Server) DriverGrantBucketAccess(ctx context.Context, req *cosi.DriverGr
 	}, nil
 }
 
-// DriverRevokeBucketAccess call revokes all access to a particular bucket from a principal.
-//
-// NOTE: this call needs to be idempotent.
+// DriverRevokeBucketAccess revokes all access to a bucket for a specific account.
+// This method ensures idempotency by not returning an error if the access is already revoked.
 func (s *Server) DriverRevokeBucketAccess(ctx context.Context, req *cosi.DriverRevokeBucketAccessRequest) (*cosi.DriverRevokeBucketAccessResponse, error) {
 	s.log.Info("Received request to revoke access to bucket.", "bucketName", req.BucketId, "AccountName", req.AccountId)
 	ctx = context.WithValue(ctx, utils.LoggerKey, &s.log)
@@ -306,7 +304,7 @@ func (s *Server) DriverRevokeBucketAccess(ctx context.Context, req *cosi.DriverR
 
 }
 
-// CreateBucket creates a bucket with versioning enabled via direct REST API call.
+// CreateBucket creates a bucket in the backend via direct REST API call, supporting versioning, compression, object locking, and retention settings.
 func (c *S3Client) CreateBucket(ctx context.Context, bucketName string, req utils.BucketRequest) error {
 	var logger logr.Logger
 	if l, ok := ctx.Value(utils.LoggerKey).(*logr.Logger); ok && l != nil {
@@ -315,7 +313,7 @@ func (c *S3Client) CreateBucket(ctx context.Context, bucketName string, req util
 
 	url := fmt.Sprintf("%s/%s", c.BaseURL, bucketName)
 
-	// Build the S3 JSON payload (minimal for COSI)
+	// Build the S3 JSON payload
 	payloadStruct := struct {
 		Compression     bool   `json:"Compression"`
 		Versioning      string `json:"Versioning,omitempty"`
@@ -469,6 +467,7 @@ func (c *S3Client) SetObjectLockConfiguration(ctx context.Context, bucketName, e
 }
 
 // --- Modular parameter parsing helpers ---
+// parseVersioning parses the versioning parameter and returns its value.
 func parseVersioning(param map[string]string) string {
 	for k, v := range param {
 		if strings.EqualFold(k, "versioning") && strings.EqualFold(v, string(utils.FeatureEnabled)) {
@@ -478,6 +477,7 @@ func parseVersioning(param map[string]string) string {
 	return string(utils.FeatureDisabled)
 }
 
+// parseCompression parses the compression parameter and returns its value as a boolean.
 func parseCompression(param map[string]string) bool {
 	for k, v := range param {
 		if strings.EqualFold(k, "compression") {
@@ -487,6 +487,7 @@ func parseCompression(param map[string]string) bool {
 	return false // default to false if not specified
 }
 
+// parseObjectLock parses the object lock parameters and returns the locking configuration.
 func parseObjectLock(param map[string]string) (locking, retentionMode string, days, years int) {
 	for k, v := range param {
 		switch strings.ToLower(k) {
@@ -517,6 +518,7 @@ func parseObjectLock(param map[string]string) (locking, retentionMode string, da
 	return
 }
 
+// parseBucketTags parses the bucket tags from the parameters and returns them as a map.
 func parseBucketTags(param map[string]string) map[string]string {
 	tags := make(map[string]string)
 	// Support legacy tag:key and new bucketTags parameter

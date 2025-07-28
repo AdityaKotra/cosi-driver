@@ -31,14 +31,6 @@ import (
 	cosi "sigs.k8s.io/container-object-storage-interface/proto"
 )
 
-// Feature represents a feature toggle with enabled or disabled states.
-type Feature string
-
-const (
-	FeatureEnabled  Feature = "Enabled"  // Indicates that the feature is enabled.
-	FeatureDisabled Feature = "Disabled" // Indicates that the feature is disabled.
-)
-
 // Server implements the cosi.ProvisionerServer interface for bucket operations.
 type Server struct {
 	log                                 logr.Logger               // Logger for logging messages.

@@ -3,6 +3,10 @@
 // Package utils
 package utils
 
+import (
+	"encoding/xml"
+)
+
 const (
 	ACCESS_POLICY_PREFIX = "acp_"
 	USER_PREFIX          = "user_"
@@ -17,7 +21,7 @@ const (
 	PROXY                = "PROXY"
 )
 
-// Defines credentials to access DSCC through GLCP API user
+// IAMCredentials defines credentials to access DSCC through GLCP API user.
 type IAMCredentials struct {
 	GLCPUser          string
 	GLCPUserSecretKey string
@@ -27,3 +31,59 @@ type IAMCredentials struct {
 	Endpoint          string
 	Proxy             string
 }
+
+// BucketRequest defines the structure for bucket creation options like versioning, locking, and compression.
+type BucketRequest struct {
+	Compression     bool   `json:"Compression"`
+	Versioning      string `json:"Versioning,omitempty"`
+	Locking         string `json:"Locking,omitempty"`
+	RetentionMode   string `json:"RetentionMode,omitempty"`
+	ObjectLockDays  int    `json:"ObjectLockDays,omitempty"`
+	ObjectLockYears int    `json:"ObjectLockYears,omitempty"`
+}
+
+// SpaceQuota defines the quota type and limit for a bucket.
+type SpaceQuota struct {
+	QuotaType     string `json:"QuotaType"`
+	QuotaLimitMiB int    `json:"QuotaLimitMiB"`
+}
+
+// CreateBucketRequest defines the structure for creating a bucket with various configurations.
+type CreateBucketRequest struct {
+	LocationConstraint string `json:"LocationConstraint"`
+	Compression        bool   `json:"Compression"`
+	BucketPolicy       string `json:"BucketPolicy"`
+	Versioning         string `json:"Versioning,omitempty"`
+	ObjectLockEnabled  string `json:"ObjectLockEnabled,omitempty"`
+	ObjectLockMode     string `json:"ObjectLockMode,omitempty"`
+	ObjectLockDays     int    `json:"ObjectLockDays,omitempty"`
+	ObjectLockYears    int    `json:"ObjectLockYears,omitempty"`
+}
+
+// ObjectLockConfiguration represents the XML structure for object lock configuration.
+type ObjectLockConfiguration struct {
+	XMLName           xml.Name        `xml:"ObjectLockConfiguration"`
+	Xmlns             string          `xml:"xmlns,attr"`
+	ObjectLockEnabled string          `xml:"ObjectLockEnabled"`
+	Rule              *ObjectLockRule `xml:"Rule,omitempty"`
+}
+
+// ObjectLockRule defines the default retention rule for object locking.
+type ObjectLockRule struct {
+	DefaultRetention ObjectLockDefaultRetention `xml:"DefaultRetention"`
+}
+
+// ObjectLockDefaultRetention defines the retention mode and duration for object locking.
+type ObjectLockDefaultRetention struct {
+	Mode  string `xml:"Mode,omitempty"`
+	Days  int    `xml:"Days,omitempty"`
+	Years int    `xml:"Years,omitempty"`
+}
+
+// Feature represents a feature toggle with enabled or disabled states.
+type Feature string
+
+const (
+	FeatureEnabled  Feature = "Enabled"
+	FeatureDisabled Feature = "Disabled"
+)

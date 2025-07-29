@@ -1,18 +1,25 @@
 // © Copyright 2024 Hewlett Packard Enterprise Development LP
 
-// Package provisioner
+// Package provisioner implements the COSI ProvisionerServer interface.
 package provisioner
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"strings"
 
 	"hpe-cosi-osp/iam"
 	"hpe-cosi-osp/servers/provisioner/utils"
 
 	"github.com/aws/aws-sdk-go/aws/endpoints"
+
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -24,12 +31,12 @@ import (
 	cosi "sigs.k8s.io/container-object-storage-interface/proto"
 )
 
-// Server implements cosi.ProvisionerServer interface.
+// Server implements the cosi.ProvisionerServer interface for bucket operations.
 type Server struct {
-	log             logr.Logger
-	K8sClientset    *kubernetes.Clientset
-	BucketClientset bucketclientset.Interface
-	cosi.UnimplementedProvisionerServer
+	log                                 logr.Logger               // Logger for logging messages.
+	K8sClientset                        *kubernetes.Clientset     // Kubernetes client for interacting with the cluster.
+	BucketClientset                     bucketclientset.Interface // Clientset for bucket operations.
+	cosi.UnimplementedProvisionerServer                           // Embeds unimplemented methods of the interface.
 }
 
 // Interface guards.
@@ -40,7 +47,7 @@ var (
 	errEmptySecretData       = errors.New("accessKey, secretKey and endpoint data are required in the secret")
 )
 
-// New returns provisioner.Server with default values.
+// New initializes and returns a new Server instance.
 func New(logger logr.Logger) (*Server, error) {
 	kubeConfig, err := rest.InClusterConfig()
 	if err != nil {
@@ -64,11 +71,8 @@ func New(logger logr.Logger) (*Server, error) {
 	}, nil
 }
 
-// DriverCreateBucket call is made to create the bucket in the backend.
-//
-// NOTE: this call needs to be idempotent.
-//  1. If a bucket that matches both name and parameters already exists, then OK (success) must be returned.
-//  2. If a bucket by same name, but different parameters is provided, then the appropriate error code ALREADY_EXISTS must be returned.
+// DriverCreateBucket handles the creation of a bucket in the backend.
+// This method ensures idempotency by checking for existing buckets with the same name and parameters.
 func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateBucketRequest) (*cosi.DriverCreateBucketResponse, error) {
 	s.log.Info("Received request to create bucket.", "bucketName", req.Name)
 	ctx = context.WithValue(ctx, utils.LoggerKey, &s.log)
@@ -79,15 +83,57 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 	// Get the parameters from the request
 	param := req.Parameters
 
-	// Create the s3 client
+	// Create the S3 client
 	s3c, err := createS3Client(ctx, param, s.K8sClientset)
 	if err != nil {
 		return nil, err
 	}
 
-	// Attempt bucket creation
-	if err = s3c.CreateBucket(ctx, bucketName, param); err != nil {
+	// --- Modular parameter parsing ---
+	versioning := parseVersioning(param)
+	compression := parseCompression(param)
+	locking, retentionMode, objectLockDays, objectLockYears := parseObjectLock(param)
+	tags := parseBucketTags(param)
+
+	// Enforce: object locking only allowed if versioning is enabled
+	if locking == string(utils.FeatureEnabled) && versioning != string(utils.FeatureEnabled) {
+		return nil, status.Error(codes.InvalidArgument, "Object locking requires versioning to be enabled.")
+	}
+
+	bucketReq := utils.BucketRequest{
+		Compression:     compression,
+		Versioning:      versioning,
+		Locking:         locking,
+		RetentionMode:   retentionMode,
+		ObjectLockDays:  objectLockDays,
+		ObjectLockYears: objectLockYears,
+	}
+
+	// Attempt bucket creation (idempotent: handle "already exists" inside CreateBucket)
+	if err = s3c.CreateBucket(ctx, bucketName, bucketReq); err != nil {
+		// If CreateBucket returns an "already exists" error, return ALREADY_EXISTS code
+		if strings.Contains(err.Error(), "already exists") {
+			return nil, status.Error(codes.AlreadyExists, "bucket already exists with different parameters")
+		}
 		return nil, status.Error(codes.Internal, "failed to create bucket due to an internal error")
+	}
+
+	// If locking is enabled, set object lock configuration
+	if locking == string(utils.FeatureEnabled) {
+		err = s3c.SetObjectLockConfiguration(ctx, bucketName, locking, retentionMode, objectLockDays, objectLockYears)
+		if err != nil {
+			s.log.Error(err, "failed to set object lock configuration")
+			return nil, status.Error(codes.Internal, "failed to set object lock configuration")
+		}
+	}
+
+	// If tags are present, set bucket tags
+	if len(tags) > 0 {
+		err = s3c.PutBucketTagging(ctx, bucketName, tags)
+		if err != nil {
+			s.log.Error(err, "failed to set bucket tags")
+			return nil, status.Error(codes.Internal, "failed to set bucket tags")
+		}
 	}
 
 	return &cosi.DriverCreateBucketResponse{
@@ -95,10 +141,8 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 	}, nil
 }
 
-// DriverDeleteBucket call is made to delete the bucket in the backend.
-//
-// NOTE: this call needs to be idempotent.
-// If the bucket has already been deleted, then no error should be returned.
+// DriverDeleteBucket handles the deletion of a bucket in the backend.
+// This method ensures idempotency by not returning an error if the bucket is already deleted.
 func (s *Server) DriverDeleteBucket(ctx context.Context, req *cosi.DriverDeleteBucketRequest) (*cosi.DriverDeleteBucketResponse, error) {
 	s.log.Info("Received request to delete bucket.", "bucketName", req.BucketId)
 	ctx = context.WithValue(ctx, utils.LoggerKey, &s.log)
@@ -115,7 +159,7 @@ func (s *Server) DriverDeleteBucket(ctx context.Context, req *cosi.DriverDeleteB
 	// Get the parameters from the spec of the bucket
 	param := bucket.Spec.Parameters
 
-	// Create the s3 client
+	// Create the S3 client
 	s3c, err := createS3Client(ctx, param, s.K8sClientset)
 	if err != nil {
 		return nil, err
@@ -129,12 +173,8 @@ func (s *Server) DriverDeleteBucket(ctx context.Context, req *cosi.DriverDeleteB
 	return &cosi.DriverDeleteBucketResponse{}, nil
 }
 
-// DriverGrantBucketAccess call grants access to an account.
-// The account_name in the request shall be used as a unique identifier to create credentials.
-//
-// NOTE: this call needs to be idempotent.
-// The account_id returned in the response will be used as the unique identifier for deleting this access when calling DriverRevokeBucketAccess.
-// The returned secret does not need to be the same each call to achieve idempotency.
+// DriverGrantBucketAccess grants access to a bucket for a specific account.
+// The account_name in the request is used as a unique identifier to create credentials.
 func (s *Server) DriverGrantBucketAccess(ctx context.Context, req *cosi.DriverGrantBucketAccessRequest) (*cosi.DriverGrantBucketAccessResponse, error) {
 	s.log.Info("Received request to grant access to bucket.", "bucketName", req.BucketId, "AccountName", req.Name)
 	ctx = context.WithValue(ctx, utils.LoggerKey, &s.log)
@@ -208,9 +248,8 @@ func (s *Server) DriverGrantBucketAccess(ctx context.Context, req *cosi.DriverGr
 	}, nil
 }
 
-// DriverRevokeBucketAccess call revokes all access to a particular bucket from a principal.
-//
-// NOTE: this call needs to be idempotent.
+// DriverRevokeBucketAccess revokes all access to a bucket for a specific account.
+// This method ensures idempotency by not returning an error if the access is already revoked.
 func (s *Server) DriverRevokeBucketAccess(ctx context.Context, req *cosi.DriverRevokeBucketAccessRequest) (*cosi.DriverRevokeBucketAccessResponse, error) {
 	s.log.Info("Received request to revoke access to bucket.", "bucketName", req.BucketId, "AccountName", req.AccountId)
 	ctx = context.WithValue(ctx, utils.LoggerKey, &s.log)
@@ -257,31 +296,342 @@ func (s *Server) DriverRevokeBucketAccess(ctx context.Context, req *cosi.DriverR
 
 }
 
-// Create s3 client using the secret data
-func createS3Client(ctx context.Context, parameters map[string]string, kcs *kubernetes.Clientset) (*utils.S3Client, error) {
-	log := utils.GetLoggerFromContext(ctx)
-	// If either the secret's name or namespace is empty, return
-	// Retrieve the secret name and namespace
+// CreateBucket creates a bucket in the backend via direct REST API call, supporting versioning, compression, object locking, and retention settings.
+func (c *S3Client) CreateBucket(ctx context.Context, bucketName string, req utils.BucketRequest) error {
+	var logger logr.Logger
+	if l, ok := ctx.Value(utils.LoggerKey).(*logr.Logger); ok && l != nil {
+		logger = *l
+	}
+
+	url := fmt.Sprintf("%s/%s", c.BaseURL, bucketName)
+
+	// Build the S3 JSON payload
+	payloadStruct := struct {
+		Compression     bool   `json:"Compression"`
+		Versioning      string `json:"Versioning,omitempty"`
+		Locking         string `json:"Locking,omitempty"`
+		RetentionMode   string `json:"RetentionMode,omitempty"`
+		ObjectLockDays  int    `json:"ObjectLockDays,omitempty"`
+		ObjectLockYears int    `json:"ObjectLockYears,omitempty"`
+	}{
+		Compression:     req.Compression,
+		Versioning:      req.Versioning,
+		Locking:         req.Locking,
+		RetentionMode:   req.RetentionMode,
+		ObjectLockDays:  req.ObjectLockDays,
+		ObjectLockYears: req.ObjectLockYears,
+	}
+	payload, err := json.Marshal(payloadStruct)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to marshal bucket request payload", "bucketName", bucketName, "payload", payloadStruct)
+		}
+		return err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewBuffer(payload))
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to create HTTP request", "bucketName", bucketName)
+		}
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Sign the request using AWS Signature Version 4
+	service := "s3"
+	err = utils.SignAWSV4(httpReq, c.AccessKey, c.SecretKey, "", service, payload)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to sign request with AWS4-HMAC-SHA256", "bucketName", bucketName)
+		}
+		return err
+	}
+	httpReq.Body = io.NopCloser(bytes.NewReader(payload))
+	httpReq.ContentLength = int64(len(payload))
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "HTTP request to create bucket failed", "bucketName", bucketName, "url", url)
+		}
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		if logger.GetSink() != nil {
+			logger.Error(fmt.Errorf("unexpected status code: %d", resp.StatusCode), "Failed to create bucket", "bucketName", bucketName, "status", resp.StatusCode, "response", string(body), "payload", string(payload), "url", url)
+		}
+		return fmt.Errorf("failed to create bucket: %s", string(body))
+	}
+	return nil
+}
+
+// DeleteBucket deletes a bucket via direct REST API call.
+func (c *S3Client) DeleteBucket(ctx context.Context, bucketName string) error {
+	url := fmt.Sprintf("%s/%s", c.BaseURL, bucketName)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return err
+	}
+	httpReq.SetBasicAuth(c.AccessKey, c.SecretKey)
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to delete bucket: %s", string(body))
+	}
+	return nil
+}
+
+// SetObjectLockConfiguration sends a PUT request to set object lock config on a bucket.
+func (c *S3Client) SetObjectLockConfiguration(ctx context.Context, bucketName, enabled, mode string, days, years int) error {
+	var logger logr.Logger
+	if l, ok := ctx.Value(utils.LoggerKey).(*logr.Logger); ok && l != nil {
+		logger = *l
+	}
+
+	url := fmt.Sprintf("%s/%s?object-lock", c.BaseURL, bucketName)
+	config := utils.ObjectLockConfiguration{
+		Xmlns:             "http://s3.amazonaws.com/doc/2006-03-01/",
+		ObjectLockEnabled: enabled,
+	}
+	if mode != "" || days > 0 || years > 0 {
+		config.Rule = &utils.ObjectLockRule{
+			DefaultRetention: utils.ObjectLockDefaultRetention{
+				Mode:  mode,
+				Days:  days,
+				Years: years,
+			},
+		}
+	}
+	body, err := xml.Marshal(config)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to marshal object lock XML", "bucketName", bucketName)
+		}
+		return err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewBuffer(body))
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to create object lock HTTP request", "bucketName", bucketName)
+		}
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/xml")
+
+	// Sign the request using AWS Signature Version 4
+	service := "s3"
+	err = utils.SignAWSV4(httpReq, c.AccessKey, c.SecretKey, "", service, body)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to sign object lock request", "bucketName", bucketName)
+		}
+		return err
+	}
+	httpReq.Body = io.NopCloser(bytes.NewReader(body))
+	httpReq.ContentLength = int64(len(body))
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "HTTP request to set object lock failed", "bucketName", bucketName, "url", url)
+		}
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		if logger.GetSink() != nil {
+			logger.Error(fmt.Errorf("unexpected status code: %d", resp.StatusCode), "Failed to set object lock", "bucketName", bucketName, "status", resp.StatusCode, "response", string(respBody), "url", url)
+		}
+		return fmt.Errorf("failed to set object lock: %s", string(respBody))
+	}
+	return nil
+}
+
+// --- Modular parameter parsing helpers ---
+// parseVersioning parses the versioning parameter and returns its value.
+func parseVersioning(param map[string]string) string {
+	for k, v := range param {
+		if strings.EqualFold(k, "versioning") && strings.EqualFold(v, string(utils.FeatureEnabled)) {
+			return string(utils.FeatureEnabled)
+		}
+	}
+	return string(utils.FeatureDisabled)
+}
+
+// parseCompression parses the compression parameter and returns its value as a boolean.
+func parseCompression(param map[string]string) bool {
+	for k, v := range param {
+		if strings.EqualFold(k, "compression") {
+			return strings.EqualFold(v, string(utils.FeatureEnabled))
+		}
+	}
+	return false // default to false if not specified
+}
+
+// parseObjectLock parses the object lock parameters and returns the locking configuration.
+func parseObjectLock(param map[string]string) (locking, retentionMode string, days, years int) {
+	for k, v := range param {
+		switch strings.ToLower(k) {
+		case "locking":
+			if strings.EqualFold(v, string(utils.FeatureEnabled)) {
+				locking = string(utils.FeatureEnabled)
+			}
+		case "retentionmode":
+			retentionMode = v
+		case "defaultretentioninterval":
+			// Parse format like 1d, 1m, 1y
+			if len(v) > 1 {
+				numPart := v[:len(v)-1]
+				unit := v[len(v)-1]
+				var n int
+				fmt.Sscanf(numPart, "%d", &n)
+				switch unit {
+				case 'd':
+					days = n
+				case 'm':
+					days = n * 30 // treat 1m as 30 days
+				case 'y':
+					years = n
+				}
+			}
+		}
+	}
+	return
+}
+
+// parseBucketTags parses the bucket tags from the parameters and returns them as a map.
+func parseBucketTags(param map[string]string) map[string]string {
+	tags := make(map[string]string)
+	// Support legacy tag:key and new bucketTags parameter
+	for k, v := range param {
+		if strings.HasPrefix(strings.ToLower(k), "tag:") {
+			tagKey := strings.TrimPrefix(k, "tag:")
+			tags[tagKey] = v
+		}
+	}
+	if tagString, ok := param["bucketTags"]; ok {
+		pairs := strings.Split(tagString, ",")
+		for _, pair := range pairs {
+			pair = strings.TrimSpace(pair)
+			if pair == "" {
+				continue
+			}
+			if strings.Contains(pair, "=") {
+				kv := strings.SplitN(pair, "=", 2)
+				key := strings.TrimSpace(kv[0])
+				val := strings.TrimSpace(kv[1])
+				if key != "" {
+					tags[key] = val
+				}
+			} else {
+				// key only, value is empty
+				tags[pair] = ""
+			}
+		}
+	}
+	return tags
+}
+
+// --- Add PutBucketTagging to S3Client ---
+func (c *S3Client) PutBucketTagging(ctx context.Context, bucketName string, tags map[string]string) error {
+	var logger logr.Logger
+	if l, ok := ctx.Value(utils.LoggerKey).(*logr.Logger); ok && l != nil {
+		logger = *l
+	}
+
+	type Tag struct {
+		Key   string `xml:"Key"`
+		Value string `xml:"Value"`
+	}
+	type TagSet struct {
+		Tags []Tag `xml:"Tag"`
+	}
+	type Tagging struct {
+		XMLName xml.Name `xml:"Tagging"`
+		TagSet  TagSet   `xml:"TagSet"`
+	}
+
+	tagList := make([]Tag, 0, len(tags))
+	for k, v := range tags {
+		tagList = append(tagList, Tag{Key: k, Value: v})
+	}
+	tagging := Tagging{TagSet: TagSet{Tags: tagList}}
+	body, err := xml.Marshal(tagging)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to marshal bucket tags XML", "bucketName", bucketName)
+		}
+		return err
+	}
+
+	url := fmt.Sprintf("%s/%s?tagging", c.BaseURL, bucketName)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewBuffer(body))
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to create bucket tagging HTTP request", "bucketName", bucketName)
+		}
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/xml")
+
+	// Sign the request using AWS Signature Version 4
+	service := "s3"
+	err = utils.SignAWSV4(httpReq, c.AccessKey, c.SecretKey, "", service, body)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to sign bucket tagging request", "bucketName", bucketName)
+		}
+		return err
+	}
+	httpReq.Body = io.NopCloser(bytes.NewReader(body))
+	httpReq.ContentLength = int64(len(body))
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "HTTP request to set bucket tags failed", "bucketName", bucketName, "url", url)
+		}
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		if logger.GetSink() != nil {
+			logger.Error(fmt.Errorf("unexpected status code: %d", resp.StatusCode), "Failed to set bucket tags", "bucketName", bucketName, "status", resp.StatusCode, "response", string(respBody), "url", url)
+		}
+		return fmt.Errorf("failed to set bucket tags: %s", string(respBody))
+	}
+	return nil
+}
+
+// Helper to create S3Client using secret data
+func createS3Client(ctx context.Context, parameters map[string]string, kcs *kubernetes.Clientset) (*S3Client, error) {
 	secretName, secretNamespace, err := getSecretNameAndNamespace(ctx, parameters)
 	if err != nil {
 		return nil, err
 	}
-
-	// Get the access key, secret key, and endpoint from the secret
 	accessKey, secretKey, endpoint, err := getDataFromSecret(ctx, secretName, secretNamespace, kcs)
 	if err != nil {
 		return nil, err
 	}
-
-	// Create the s3 client using package utils with the above data.
-	// This client will be used to create and delete buckets.
-	s3c, err := utils.NewS3Client(ctx, accessKey, secretKey, endpoint)
-	if err != nil {
-		log.Error(err, "failed to create new S3 client")
-		return nil, status.Error(codes.Internal, "failed to create new S3 client")
-	}
-
-	return s3c, nil
+	return &S3Client{
+		BaseURL:    endpoint,
+		HTTPClient: &http.Client{},
+		AccessKey:  accessKey,
+		SecretKey:  secretKey,
+	}, nil
 }
 
 // Get the name and namespace of the secret
@@ -448,7 +798,7 @@ func createBucketAccess(ctx context.Context, userName, policyName, bucketName st
 			msg := "failed to create s3 access policy in DSCC."
 			log.Error(err, msg)
 			if err == nil {
-				err = fmt.Errorf("%s",msg)
+				err = fmt.Errorf("%s", msg)
 			}
 			return "", "", err
 
@@ -468,7 +818,7 @@ func createBucketAccess(ctx context.Context, userName, policyName, bucketName st
 		msg := "failure seen with applying policy to s3 user in DSCC."
 		log.Error(err, msg)
 		if err == nil {
-			err = fmt.Errorf("%s",msg)
+			err = fmt.Errorf("%s", msg)
 		}
 		return "", "", err
 	}
@@ -520,7 +870,7 @@ func deleteBucketAccess(ctx context.Context, userName, policyName, bucketName st
 			msg := "failed to delete s3 user in DSCC."
 			log.Error(err, msg)
 			if err == nil {
-				err = fmt.Errorf("%s",msg)
+				err = fmt.Errorf("%s", msg)
 			}
 			return err
 
@@ -550,7 +900,7 @@ func deleteBucketAccess(ctx context.Context, userName, policyName, bucketName st
 			msg := "failed to delete s3 access policy in DSCC."
 			log.Error(err, msg)
 			if err == nil {
-				err = fmt.Errorf("%s",msg)
+				err = fmt.Errorf("%s", msg)
 			}
 			return err
 
@@ -567,4 +917,12 @@ func getAccessToken(credentials *utils.IAMCredentials, log *logr.Logger) (string
 	ts := iam.NewTokenService(credentials.GLCPCommonCloud, credentials.GLCPUser, credentials.GLCPUserSecretKey, credentials.Proxy, log)
 	token, err := ts.GetAccessToken()
 	return token, err
+}
+
+// S3Client is a client for direct REST API calls to the S3 backend for S3 bucket operations.
+type S3Client struct {
+	BaseURL    string
+	HTTPClient *http.Client
+	AccessKey  string
+	SecretKey  string
 }

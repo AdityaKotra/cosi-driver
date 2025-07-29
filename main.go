@@ -129,12 +129,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set permissions to 0666 for the socket file so sidecar can access it
-	if err := os.Chmod(url.Path, 0666); err != nil {
-		log.Error(err, "failed to set permissions on socket file", "path", url.Path)
-		os.Exit(1)
-	}
-
 	// Start serving requests on the socket
 	err = server.Serve(lis)
 	if err != nil {

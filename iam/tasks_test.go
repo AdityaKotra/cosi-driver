@@ -15,7 +15,7 @@ func Test_TaskStatus(t *testing.T) {
 	token := "bearerdummyoxyzxxzzz12xxxx341111zzzzyyyyyyQQQQQHHHHH"
 	systemId := "DUMMY_SETUP"
 	proxy := "http://dummy_proxy:8080"
-	apiClient, _ := NewAPIClient(host, token, proxy).GetTaskAPIClient()
+	apiClient, _ := NewAPIClient(host, token, proxy, "").GetTaskAPIClient()
 	taskUi := GetMockTaskResponseUi()
 	task := NewTask(taskUi.TaskUri, systemId, apiClient, context.Background())
 	t.Run("TaskStatus successful", func(t *testing.T) {

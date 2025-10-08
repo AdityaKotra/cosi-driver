@@ -208,6 +208,6 @@ func Test_DeleteS3AccessPolicy(t *testing.T) {
 func getNewS3Policy() *s3policy {
 	policyName := "bucket1_policy"
 	bucket := "bucket1"
-	apiClient, _ := NewAPIClient(host, token, proxy).GetAPIClient()
+	apiClient, _ := NewAPIClient(host, token, proxy, "").GetAPIClient()
 	return NewS3Policy(policyName, bucket, systemId, apiClient, context.Background())
 }

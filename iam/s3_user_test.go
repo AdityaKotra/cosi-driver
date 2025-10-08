@@ -250,6 +250,6 @@ func Test_DeleteS3User(t *testing.T) {
 func getNewS3User() *s3user {
 	token := "bearerdummyoxyzxxzzz12xxxx341111zzzzyyyyyyQQQQQHHHHH"
 	userName := "bucket1_user"
-	apiClient, _ := NewAPIClient(host, token, proxy).GetAPIClient()
+	apiClient, _ := NewAPIClient(host, token, proxy, "").GetAPIClient()
 	return NewS3User(userName, systemId, apiClient, context.Background())
 }

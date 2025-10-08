@@ -52,14 +52,41 @@ func (a *api_client) GetAPIClient() (*sdk.APIClient, error) {
 	configuration.OperationServers = map[string]sdk.ServerConfigurations{
 		"ObjectstoreIdentitiesAPI.HPE_Alletra_Storage_MP_X10000": serverConfigs}
 	api := sdk.NewAPIClient(configuration)
+	if len(a.glcpCloudCA) > 0 {
+		transport := &http.Transport{}
 
-	// Configure TLS transport with custom CA support
-	transport, err := a.configureTLSTransport()
-	if err != nil {
-		return nil, err
+		// Decode base64 encoded CA certificate
+		caCertData, err := base64.StdEncoding.DecodeString(a.glcpCloudCA)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode base64 CA certificate: %v", err)
+		}
+
+		// Create certificate pool and add custom CA
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCertData) {
+			return nil, fmt.Errorf("failed to parse CA certificate")
+		}
+
+		transport.TLSClientConfig = &tls.Config{
+			RootCAs: caCertPool,
+		}
+
+		if len(a.proxy) != 0 {
+			proxy, err := url.Parse(a.proxy)
+			if err != nil {
+				return nil, err
+			}
+			transport.Proxy = http.ProxyURL(proxy)
+		}
+
+		api.GetConfig().HTTPClient.Transport = transport
+	} else if len(a.proxy) != 0 {
+		proxy, err := url.Parse(a.proxy)
+		if err != nil {
+			return nil, err
+		}
+		api.GetConfig().HTTPClient.Transport = &http.Transport{Proxy: http.ProxyURL(proxy)}
 	}
-
-	api.GetConfig().HTTPClient.Transport = transport
 	return api, nil
 }
 
@@ -85,29 +112,9 @@ func (a *api_client) GetTaskAPIClient() (*tsdk.APIClient, error) {
 	configuration.OperationServers = map[string]tsdk.ServerConfigurations{
 		"TasksAPIService.GetTaskStatus": serverConfigs}
 	api := tsdk.NewAPIClient(configuration)
-
-	// Configure TLS transport with custom CA support
-	transport, err := a.configureTLSTransport()
-	if err != nil {
-		return nil, err
-	}
-
-	api.GetConfig().HTTPClient.Transport = transport
-	return api, nil
-}
-
-// Constructs an header for the passing the oauth2 bearer token
-func constructBearerToken(token string) map[string]string {
-	return map[string]string{"Authorization": "Bearer " + token}
-}
-
-// configureTLSTransport configures HTTP transport with custom CA certificate if provided
-func (a *api_client) configureTLSTransport() (*http.Transport, error) {
-	// Create TLS configuration
-	tlsConfig := &tls.Config{}
-
-	// Configure custom CA certificate for on-premise DSCC if provided
 	if len(a.glcpCloudCA) > 0 {
+		transport := &http.Transport{}
+
 		// Decode base64 encoded CA certificate
 		caCertData, err := base64.StdEncoding.DecodeString(a.glcpCloudCA)
 		if err != nil {
@@ -120,25 +127,32 @@ func (a *api_client) configureTLSTransport() (*http.Transport, error) {
 			return nil, fmt.Errorf("failed to parse CA certificate")
 		}
 
-		tlsConfig.RootCAs = caCertPool
-	} else {
-		// For corporate environments without custom CA, skip certificate verification
-		tlsConfig.InsecureSkipVerify = true
-	}
+		transport.TLSClientConfig = &tls.Config{
+			RootCAs: caCertPool,
+		}
 
-	// Create transport with TLS configuration
-	transport := &http.Transport{
-		TLSClientConfig: tlsConfig,
-	}
+		// Add proxy configuration if provided
+		if len(a.proxy) != 0 {
+			proxy, err := url.Parse(a.proxy)
+			if err != nil {
+				return nil, err
+			}
+			transport.Proxy = http.ProxyURL(proxy)
+		}
 
-	// Configure proxy if provided
-	if len(a.proxy) != 0 {
+		api.GetConfig().HTTPClient.Transport = transport
+	} else if len(a.proxy) != 0 {
+		// Original proxy-only logic when no CA certificate
 		proxy, err := url.Parse(a.proxy)
 		if err != nil {
 			return nil, err
 		}
-		transport.Proxy = http.ProxyURL(proxy)
+		api.GetConfig().HTTPClient.Transport = &http.Transport{Proxy: http.ProxyURL(proxy)}
 	}
+	return api, nil
+}
 
-	return transport, nil
+// Constructs an header for the passing the oauth2 bearer token
+func constructBearerToken(token string) map[string]string {
+	return map[string]string{"Authorization": "Bearer " + token}
 }

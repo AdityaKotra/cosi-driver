@@ -24,7 +24,7 @@ func Test_GetAccessToken(t *testing.T) {
 	proxy := "http://dummy_proxy:8080"
 	log := stdr.New(stdlog.New(os.Stdout, "", stdlog.LstdFlags))
 
-	ts := NewTokenService(glcpUrl, glcpUser, glcpUserSecret, proxy, &log)
+	ts := NewTokenService(glcpUrl, glcpUser, glcpUserSecret, proxy, "", &log)
 
 	t.Run("GetAccessToken successful", func(t *testing.T) {
 		expToken := "bearerdummyoxyzxxzzz12xxxx341111zzzzyyyyyyQQQQQHHHHHbF9fc2NGOGpT"

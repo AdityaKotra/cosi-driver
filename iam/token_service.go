@@ -109,12 +109,10 @@ func (t *token_service) PostRequest(uri string, body *bytes.Reader, headers map[
 		Timeout: HTTP_REQUEST_TIMEOUT,
 	}
 
-	// Create TLS configuration
-	tlsConfig := &tls.Config{}
-
-	// Configure custom CA certificate for on-premise DSCC if provided
 	if len(t.glcpCloudCA) > 0 {
-		t.log.Info("Using custom CA certificate for on-premise DSCC GLCP authentication")
+		t.log.Info("Configuring custom CA certificate for GLCP authentication")
+
+		transport := &http.Transport{}
 
 		// Decode base64 encoded CA certificate
 		caCertData, err := base64.StdEncoding.DecodeString(t.glcpCloudCA)
@@ -130,28 +128,28 @@ func (t *token_service) PostRequest(uri string, body *bytes.Reader, headers map[
 			return nil, fmt.Errorf("failed to parse CA certificate")
 		}
 
-		tlsConfig.RootCAs = caCertPool
-		t.log.Info("Successfully configured custom CA certificate for GLCP authentication")
-	} else {
-		// For corporate environments without custom CA, skip certificate verification
-		t.log.Info("No custom CA provided, skipping certificate verification for corporate environments")
-		tlsConfig.InsecureSkipVerify = true
-	}
+		transport.TLSClientConfig = &tls.Config{
+			RootCAs: caCertPool,
+		}
 
-	// Create transport with TLS configuration
-	transport := &http.Transport{
-		TLSClientConfig: tlsConfig,
-	}
+		if len(t.proxy) != 0 {
+			proxy, err := url.Parse(t.proxy)
+			if err != nil {
+				t.log.Error(err, "error parsing proxy: "+t.proxy)
+				return nil, err
+			}
+			transport.Proxy = http.ProxyURL(proxy)
+		}
 
-	if len(t.proxy) != 0 {
+		client.Transport = transport
+		t.log.Info("Custom CA certificate configured successfully")
+	} else if len(t.proxy) != 0 {
 		proxy, err := url.Parse(t.proxy)
 		if err != nil {
 			t.log.Error(err, "error parsing proxy: "+t.proxy)
 			return nil, err
 		}
-		transport.Proxy = http.ProxyURL(proxy)
+		client.Transport = &http.Transport{Proxy: http.ProxyURL(proxy)}
 	}
-
-	client.Transport = transport
 	return client.Do(req)
 }

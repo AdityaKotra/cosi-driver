@@ -724,6 +724,10 @@ func getGLCPCDetails(data map[string][]byte) (*utils.IAMCredentials, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Get optional GLCP Cloud CA certificate for on-premise DSCC
+	glcpCloudCA, _ := getData(utils.GLCP_CLOUD_CA) // Optional field, no error if missing
+
 	return &utils.IAMCredentials{
 		GLCPUser:          glcpUserClientId,
 		GLCPUserSecretKey: glcpUserSecretKey,
@@ -732,6 +736,7 @@ func getGLCPCDetails(data map[string][]byte) (*utils.IAMCredentials, error) {
 		SystemId:          clusterSerialNumber,
 		Endpoint:          endpoint,
 		Proxy:             proxy,
+		GLCPCloudCA:       glcpCloudCA,
 	}, nil
 }
 
@@ -748,7 +753,7 @@ func createBucketAccess(ctx context.Context, userName, policyName, bucketName st
 		return "", "", err
 	}
 
-	api_client := iam.NewAPIClient(credentials.DSCCZone, token, credentials.Proxy)
+	api_client := iam.NewAPIClient(credentials.DSCCZone, token, credentials.Proxy, credentials.GLCPCloudCA)
 	client, _ := api_client.GetAPIClient()
 	tclient, err := api_client.GetTaskAPIClient()
 	if err != nil {
@@ -842,7 +847,7 @@ func deleteBucketAccess(ctx context.Context, userName, policyName, bucketName st
 	}
 
 	//Get SDK CLients
-	api_client := iam.NewAPIClient(credentials.DSCCZone, token, credentials.Proxy)
+	api_client := iam.NewAPIClient(credentials.DSCCZone, token, credentials.Proxy, credentials.GLCPCloudCA)
 	client, _ := api_client.GetAPIClient()
 	tclient, err := api_client.GetTaskAPIClient()
 	if err != nil {
@@ -914,7 +919,7 @@ func deleteBucketAccess(ctx context.Context, userName, policyName, bucketName st
 
 // Fetches a fresh bearer token to access DSCC, through GLCP
 func getAccessToken(credentials *utils.IAMCredentials, log *logr.Logger) (string, error) {
-	ts := iam.NewTokenService(credentials.GLCPCommonCloud, credentials.GLCPUser, credentials.GLCPUserSecretKey, credentials.Proxy, log)
+	ts := iam.NewTokenService(credentials.GLCPCommonCloud, credentials.GLCPUser, credentials.GLCPUserSecretKey, credentials.Proxy, credentials.GLCPCloudCA, log)
 	token, err := ts.GetAccessToken()
 	return token, err
 }

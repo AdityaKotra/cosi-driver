@@ -3,6 +3,9 @@ package iam
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,16 +37,18 @@ type token_service struct {
 	apiCLientId     string
 	apiClientSecret string
 	proxy           string
+	glcpCloudCA     string // Base64 encoded CA certificate for on-premise DSCC
 	log             *logr.Logger
 }
 
 // Creates an instance of the TokenService struct
-func NewTokenService(glcpUrl, clientId, secret, proxy string, log *logr.Logger) *token_service {
+func NewTokenService(glcpUrl, clientId, secret, proxy, glcpCloudCA string, log *logr.Logger) *token_service {
 	return &token_service{
 		glcpCloudUrl:    glcpUrl,
 		apiCLientId:     clientId,
 		apiClientSecret: secret,
 		proxy:           proxy,
+		glcpCloudCA:     glcpCloudCA,
 		log:             log,
 	}
 }
@@ -103,13 +108,50 @@ func (t *token_service) PostRequest(uri string, body *bytes.Reader, headers map[
 	client := http.Client{
 		Timeout: HTTP_REQUEST_TIMEOUT,
 	}
+
+	// Create TLS configuration
+	tlsConfig := &tls.Config{}
+
+	// Configure custom CA certificate for on-premise DSCC if provided
+	if len(t.glcpCloudCA) > 0 {
+		t.log.Info("Using custom CA certificate for on-premise DSCC GLCP authentication")
+
+		// Decode base64 encoded CA certificate
+		caCertData, err := base64.StdEncoding.DecodeString(t.glcpCloudCA)
+		if err != nil {
+			t.log.Error(err, "failed to decode base64 CA certificate")
+			return nil, fmt.Errorf("failed to decode base64 CA certificate: %v", err)
+		}
+
+		// Create certificate pool and add custom CA
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCertData) {
+			t.log.Error(nil, "failed to parse CA certificate")
+			return nil, fmt.Errorf("failed to parse CA certificate")
+		}
+
+		tlsConfig.RootCAs = caCertPool
+		t.log.Info("Successfully configured custom CA certificate for GLCP authentication")
+	} else {
+		// For corporate environments without custom CA, skip certificate verification
+		t.log.Info("No custom CA provided, skipping certificate verification for corporate environments")
+		tlsConfig.InsecureSkipVerify = true
+	}
+
+	// Create transport with TLS configuration
+	transport := &http.Transport{
+		TLSClientConfig: tlsConfig,
+	}
+
 	if len(t.proxy) != 0 {
 		proxy, err := url.Parse(t.proxy)
 		if err != nil {
 			t.log.Error(err, "error parsing proxy: "+t.proxy)
 			return nil, err
 		}
-		client.Transport = &http.Transport{Proxy: http.ProxyURL(proxy)}
+		transport.Proxy = http.ProxyURL(proxy)
 	}
+
+	client.Transport = transport
 	return client.Do(req)
 }

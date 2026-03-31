@@ -36,7 +36,8 @@ func Test_GetAccessToken(t *testing.T) {
 		data, _ := json.Marshal(oauth2)
 		reader := bytes.NewReader(data)
 		response := http.Response{
-			Body: io.NopCloser(reader),
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(reader),
 		}
 		patch := gomonkey.ApplyMethodReturn(ts, "PostRequest", &response, nil)
 		defer patch.Reset()

@@ -79,6 +79,11 @@ func (t *token_service) GetAccessToken() (string, error) {
 		return "", err
 	}
 
+	if res.StatusCode != http.StatusOK {
+		t.log.Error(fmt.Errorf("unexpected status code: %d", res.StatusCode), "Token REST API returned non-OK status", "statusCode", res.StatusCode)
+		return "", fmt.Errorf("token REST API returned status %d", res.StatusCode)
+	}
+
 	var o1 oauth2_token
 
 	if err = json.Unmarshal(body, &o1); err != nil {

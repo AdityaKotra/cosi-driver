@@ -725,8 +725,8 @@ func getGLCPCDetails(data map[string][]byte) (*utils.IAMCredentials, error) {
 		return nil, err
 	}
 
-	// Get optional GLCP Cloud CA certificate for on-premise DSCC
-	glcpCloudCA, _ := getData(utils.GLCP_CLOUD_CA) // Optional field, no error if missing
+	// Get optional on-premise Cloud CA certificate for on-premise DSCC
+	onPremCloudCA, _ := getData(utils.ON_PREM_CLOUD_CA) // Optional field, no error if missing
 
 	return &utils.IAMCredentials{
 		GLCPUser:          glcpUserClientId,
@@ -736,7 +736,7 @@ func getGLCPCDetails(data map[string][]byte) (*utils.IAMCredentials, error) {
 		SystemId:          clusterSerialNumber,
 		Endpoint:          endpoint,
 		Proxy:             proxy,
-		GLCPCloudCA:       glcpCloudCA,
+		OnPremCloudCA:     onPremCloudCA,
 	}, nil
 }
 
@@ -749,15 +749,25 @@ func createBucketAccess(ctx context.Context, userName, policyName, bucketName st
 		return "", "", err
 	}
 	token, err := getAccessToken(credentials, log)
-	if err != nil || len(token) == 0 {
+	if err != nil {
+		log.Error(err, "error while fetching access token from GLCP")
+		return "", "", err
+	}
+	if len(token) == 0 {
+		err = fmt.Errorf("empty access token received from GLCP")
+		log.Error(err, "failed to obtain valid access token")
 		return "", "", err
 	}
 
-	api_client := iam.NewAPIClient(credentials.DSCCZone, token, credentials.Proxy, credentials.GLCPCloudCA)
-	client, _ := api_client.GetAPIClient()
+	api_client := iam.NewAPIClient(credentials.DSCCZone, token, credentials.Proxy, credentials.OnPremCloudCA)
+	client, err := api_client.GetAPIClient()
+	if err != nil {
+		log.Error(err, fmt.Sprintf("error creating DSCC API client for %s.", credentials.DSCCZone))
+		return "", "", err
+	}
 	tclient, err := api_client.GetTaskAPIClient()
 	if err != nil {
-		log.Error(err, fmt.Sprintf("error creating DSCC API %s, client for IAM operations.", credentials.DSCCZone))
+		log.Error(err, fmt.Sprintf("error creating DSCC Task API client for %s.", credentials.DSCCZone))
 		return "", "", err
 	}
 	// Create S3 User
@@ -843,15 +853,25 @@ func deleteBucketAccess(ctx context.Context, userName, policyName, bucketName st
 
 	token, err := getAccessToken(credentials, log)
 	if err != nil {
+		log.Error(err, "error while fetching access token from GLCP")
+		return err
+	}
+	if len(token) == 0 {
+		err = fmt.Errorf("empty access token received from GLCP")
+		log.Error(err, "failed to obtain valid access token")
 		return err
 	}
 
 	//Get SDK CLients
-	api_client := iam.NewAPIClient(credentials.DSCCZone, token, credentials.Proxy, credentials.GLCPCloudCA)
-	client, _ := api_client.GetAPIClient()
+	api_client := iam.NewAPIClient(credentials.DSCCZone, token, credentials.Proxy, credentials.OnPremCloudCA)
+	client, err := api_client.GetAPIClient()
+	if err != nil {
+		log.Error(err, fmt.Sprintf("error creating DSCC API client for %s.", credentials.DSCCZone))
+		return err
+	}
 	tclient, err := api_client.GetTaskAPIClient()
 	if err != nil {
-		log.Error(err, fmt.Sprintf("error creating DSCC API %s, client for IAM operations.", credentials.DSCCZone))
+		log.Error(err, fmt.Sprintf("error creating DSCC Task API client for %s.", credentials.DSCCZone))
 		return err
 	}
 
@@ -919,7 +939,7 @@ func deleteBucketAccess(ctx context.Context, userName, policyName, bucketName st
 
 // Fetches a fresh bearer token to access DSCC, through GLCP
 func getAccessToken(credentials *utils.IAMCredentials, log *logr.Logger) (string, error) {
-	ts := iam.NewTokenService(credentials.GLCPCommonCloud, credentials.GLCPUser, credentials.GLCPUserSecretKey, credentials.Proxy, credentials.GLCPCloudCA, log)
+	ts := iam.NewTokenService(credentials.GLCPCommonCloud, credentials.GLCPUser, credentials.GLCPUserSecretKey, credentials.Proxy, credentials.OnPremCloudCA, log)
 	token, err := ts.GetAccessToken()
 	return token, err
 }

@@ -57,7 +57,7 @@ create_secret()
     # Add CA certificate if provided
     if [[ -n "$glcp_ca" ]]; then
         echo "Including GLCP CA certificate for on-premise DSCC support..."
-        kubectl_cmd="$kubectl_cmd --from-literal=glcpCloudCA=\"$glcp_ca\""
+        kubectl_cmd="$kubectl_cmd --from-literal=onPremCloudCA=\"$glcp_ca\""
     fi
     
     # Execute the kubectl command

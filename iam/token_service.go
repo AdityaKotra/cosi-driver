@@ -3,15 +3,11 @@ package iam
 
 import (
 	"bytes"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -37,18 +33,18 @@ type token_service struct {
 	apiCLientId     string
 	apiClientSecret string
 	proxy           string
-	glcpCloudCA     string // Base64 encoded CA certificate for on-premise DSCC
+	onPremCloudCA   string // Base64 encoded CA certificate for on-premise DSCC
 	log             *logr.Logger
 }
 
 // Creates an instance of the TokenService struct
-func NewTokenService(glcpUrl, clientId, secret, proxy, glcpCloudCA string, log *logr.Logger) *token_service {
+func NewTokenService(glcpUrl, clientId, secret, proxy, onPremCloudCA string, log *logr.Logger) *token_service {
 	return &token_service{
 		glcpCloudUrl:    glcpUrl,
 		apiCLientId:     clientId,
 		apiClientSecret: secret,
 		proxy:           proxy,
-		glcpCloudCA:     glcpCloudCA,
+		onPremCloudCA:   onPremCloudCA,
 		log:             log,
 	}
 }
@@ -80,7 +76,7 @@ func (t *token_service) GetAccessToken() (string, error) {
 	}
 
 	if res.StatusCode != http.StatusOK {
-		t.log.Error(fmt.Errorf("unexpected status code: %d", res.StatusCode), "Token REST API returned non-OK status", "statusCode", res.StatusCode)
+		t.log.Error(fmt.Errorf("unexpected status code: %d", res.StatusCode), "Token REST API returned non-OK status", "statusCode", res.StatusCode, "response body", string(body))
 		return "", fmt.Errorf("token REST API returned status %d", res.StatusCode)
 	}
 
@@ -114,47 +110,12 @@ func (t *token_service) PostRequest(uri string, body *bytes.Reader, headers map[
 		Timeout: HTTP_REQUEST_TIMEOUT,
 	}
 
-	if len(t.glcpCloudCA) > 0 {
-		t.log.Info("Configuring custom CA certificate for GLCP authentication")
-
-		transport := &http.Transport{}
-
-		// Decode base64 encoded CA certificate
-		caCertData, err := base64.StdEncoding.DecodeString(t.glcpCloudCA)
-		if err != nil {
-			t.log.Error(err, "failed to decode base64 CA certificate")
-			return nil, fmt.Errorf("failed to decode base64 CA certificate: %v", err)
-		}
-
-		// Create certificate pool and add custom CA
-		caCertPool := x509.NewCertPool()
-		if !caCertPool.AppendCertsFromPEM(caCertData) {
-			t.log.Error(nil, "failed to parse CA certificate")
-			return nil, fmt.Errorf("failed to parse CA certificate")
-		}
-
-		transport.TLSClientConfig = &tls.Config{
-			RootCAs: caCertPool,
-		}
-
-		if len(t.proxy) != 0 {
-			proxy, err := url.Parse(t.proxy)
-			if err != nil {
-				t.log.Error(err, "error parsing proxy: "+t.proxy)
-				return nil, err
-			}
-			transport.Proxy = http.ProxyURL(proxy)
-		}
-
-		client.Transport = transport
-		t.log.Info("Custom CA certificate configured successfully")
-	} else if len(t.proxy) != 0 {
-		proxy, err := url.Parse(t.proxy)
-		if err != nil {
-			t.log.Error(err, "error parsing proxy: "+t.proxy)
-			return nil, err
-		}
-		client.Transport = &http.Transport{Proxy: http.ProxyURL(proxy)}
+	transport, err := buildHTTPTransport(t.proxy, t.onPremCloudCA)
+	if err != nil {
+		t.log.Error(err, "failed to build HTTP transport")
+		return nil, err
 	}
+	client.Transport = transport
+
 	return client.Do(req)
 }

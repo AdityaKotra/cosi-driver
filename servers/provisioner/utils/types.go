@@ -17,7 +17,7 @@ const (
 	DSCC_ZONE            = "dsccZone"
 	ALLETRA_MP_X10K_SNO  = "clusterSerialNumber"
 	ENDPOINT             = "endpoint"
-	GLCP_CLOUD_CA        = "glcpCloudCA"
+	ON_PREM_CLOUD_CA     = "onPremCloudCA"
 	RETRY_ATTEMPT        = 3
 	PROXY                = "PROXY"
 )
@@ -31,7 +31,7 @@ type IAMCredentials struct {
 	SystemId          string
 	Endpoint          string
 	Proxy             string
-	GLCPCloudCA       string // Base64 encoded CA certificate for on-premise DSCC
+	OnPremCloudCA     string // Base64 encoded CA certificate for on-premise DSCC
 }
 
 // BucketRequest defines the structure for bucket creation options like versioning, locking, and compression.

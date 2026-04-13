@@ -3,17 +3,54 @@
 package iam
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/pem"
+	"math/big"
 	"testing"
+	"time"
 )
 
 var host = "us1.xxxx.xxxxx.hpe.com"
 var token = "bearerdummyoxyzxxzzz12xxxx341111zzzzyyyyyyQQQQQHHHHH"
 var proxy = "http://dummy_proxy:8080"
 
-// Valid base64-encoded self-signed CA certificate for testing
-var validCACert = "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURCVENDQWUyZ0F3SUJBZ0lVRk1wN01rN3NnZWJVQW52ZFFvejczaC9OM1NNd0RRWUpLb1pJaHZjTkFRRUwKQlFBd0VqRVFNQTRHQTFVRUF3d0hkR1Z6ZEMxallUQWVGdzB5TmpBME1Ea3dOakEyTXpGYUZ3MHlOekEwTURrdwpOakEyTXpGYU1CSXhFREFPQmdOVkJBTU1CM1JsYzNRdFkyRXdnZ0VpTUEwR0NTcUdTSWIzRFFFQkFRVUFBNElCCkR3QXdnZ0VLQW9JQkFRQzk4SXVpOE80NUFiQmFVaHkyWjdTelRKK1lBTGxJMFRySUg5KzkvNFpDZXpydXQ1bkEKZEE0RUJ3Vml1aWpWdXphQXFLM1QvN2Y1R1c2MUt5NVZLOUdGTjhORGNmeHlqQjVHNjR1WUQrSGNGSTJCRjg0SQpLaVBBVVNuaUdYN2NRUnUyZndUd20rWU9xRU5TaGl4aUhwVzkvQkY1Ry84cU5vVjJLUnh6djMvaWtySVp1ZUovCkVhOVZMVlVvMG1NVHRyTkZlcFVaVXNoZnl3OVpQZW5MRUdvaGNRejd2WHJ5VThaNVp3eDBDODhBa3hsYmx1aFQKS3g4RmZ0NzNVVkpTSmZjSXRUME0xbUNrZEVNWDNhMDh1ZkdTU3lWWDZZRTA0RlFSMC96ZEVUazh0d3RkcGpjbgpWZ3lNN2JtY2ZWYmlMazRCSCtvZmRRbDJEVHlDUzVINkVBb1ZBZ01CQUFHalV6QlJNQjBHQTFVZERnUVdCQlRXCjRVSW54cUJMUEcwNnpCNkNMaGxNb0lXVDVEQWZCZ05WSFNNRUdEQVdnQlRXNFVJbnhxQkxQRzA2ekI2Q0xobE0Kb0lXVDVEQVBCZ05WSFJNQkFmOEVCVEFEQVFIL01BMEdDU3FHU0liM0RRRUJDd1VBQTRJQkFRQzBBczkxSnVwbAp2UUVDTkwxanJKcUVuc0lXc3BUajlPL2MzVUo3S0hZOHpGS2F6V21OL1hsV0RoZzRyVlg4UVFETk5rbTBxWGdRCjNSekN4RGZDSCtDQzAyemRoVkVYWnErMDNnWGkwSzZIaTJPOWNza0hOVFgyZ3VDZHF1dEpNY1l1eDRTSElFTzMKUHlBb3pyYmFENHJpK1NiNHkva0xNUUJ5aXdMcERWeG1JNm1Ubm9Sb2FOTEwvY3pvNnQ3ZEtGRFl2c0FJQVZuSwpSL243Y1ZFSTRRRGNyR1pPVUt5Y1lOcjlxazRtRXBzdUNCM29ZT0pPMmNKelo0Vk1qSjVOZnROdi9aVlphTmpKCmVaZ2xNWSswamc3NW9hLzJsaHJQTmRzaGVNaWo0RmxDUHpiNGlmNEVrZDFIUHIrdWlISmRUNnFzSTRsdEYvelAKNTUzZ2I5bVUvVGpUCi0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K"
+// generateTestCACert generates a self-signed CA certificate at runtime for unit testing.
+// Visible for UT alone — avoids hardcoding certificate data.
+func generateTestCACert(t *testing.T) string {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate private key: %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(1 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("failed to create certificate: %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	return base64.StdEncoding.EncodeToString(certPEM)
+}
 
 func Test_GetAPIClient(t *testing.T) {
+	validCACert := generateTestCACert(t)
+
 	t.Run("GetAPIClient successful", func(t *testing.T) {
 		apiClient := NewAPIClient(host, token, proxy, "")
 		client, err := apiClient.GetAPIClient()
@@ -66,6 +103,8 @@ func Test_GetAPIClient(t *testing.T) {
 }
 
 func Test_GetTaskAPIClient(t *testing.T) {
+	validCACert := generateTestCACert(t)
+
 	t.Run("GetTaskAPIClient successful", func(t *testing.T) {
 		apiClient := NewAPIClient(host, token, proxy, "")
 		client, err := apiClient.GetTaskAPIClient()
@@ -118,6 +157,8 @@ func Test_GetTaskAPIClient(t *testing.T) {
 }
 
 func Test_buildHTTPTransport(t *testing.T) {
+	validCACert := generateTestCACert(t)
+
 	t.Run("buildHTTPTransport with no proxy and no CA", func(t *testing.T) {
 		transport, err := buildHTTPTransport("", "")
 		if err != nil {

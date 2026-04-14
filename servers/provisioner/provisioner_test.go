@@ -540,7 +540,7 @@ func TestDriverGrantBucketAccess(t *testing.T) {
 				},
 			},
 			setupPatches: func() *gomonkey.Patches {
-				p := gomonkey.ApplyMethodReturn(secretInt, "Get", secret, nil)
+				p := gomonkey.ApplyFuncReturn(getSecret, secret, nil)
 				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
 				p = p.ApplyFuncReturn(getAccessToken, "bearerdummyoxyzxxzzz12xxxx341111zzzzyyyyyyQQQQQHHHHH", nil)
 				p = p.ApplyFuncReturn(iam.NewS3Policy, policy)
@@ -577,7 +577,7 @@ func TestDriverGrantBucketAccess(t *testing.T) {
 				AccountId: accessName,
 			},
 			setupPatches: func() *gomonkey.Patches {
-				p := gomonkey.ApplyMethodReturn(secretInt, "Get", nil, errors.New("failed to get secret"))
+				p := gomonkey.ApplyFuncReturn(getSecret, nil, errors.New("failed to get secret"))
 				return p
 			},
 			wantErr: true,
@@ -626,7 +626,7 @@ func TestDriverGrantBucketAccess(t *testing.T) {
 				AccountId: accessName,
 			},
 			setupPatches: func() *gomonkey.Patches {
-				p := gomonkey.ApplyMethodReturn(secretInt, "Get", removeSecretData(utils.GLCP_USER_CLIENTID), nil)
+				p := gomonkey.ApplyFuncReturn(getSecret, removeSecretData(utils.GLCP_USER_CLIENTID), nil)
 				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
 				return p
 			},
@@ -654,7 +654,7 @@ func TestDriverGrantBucketAccess(t *testing.T) {
 				AccountId: accessName,
 			},
 			setupPatches: func() *gomonkey.Patches {
-				p := gomonkey.ApplyMethodReturn(secretInt, "Get", removeSecretData(utils.GLCP_USER_SECRET_KEY), nil)
+				p := gomonkey.ApplyFuncReturn(getSecret, removeSecretData(utils.GLCP_USER_SECRET_KEY), nil)
 				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
 				return p
 			},
@@ -682,7 +682,7 @@ func TestDriverGrantBucketAccess(t *testing.T) {
 				AccountId: accessName,
 			},
 			setupPatches: func() *gomonkey.Patches {
-				p := gomonkey.ApplyMethodReturn(secretInt, "Get", removeSecretData(utils.DSCC_ZONE), nil)
+				p := gomonkey.ApplyFuncReturn(getSecret, removeSecretData(utils.DSCC_ZONE), nil)
 				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
 				return p
 			},
@@ -710,7 +710,7 @@ func TestDriverGrantBucketAccess(t *testing.T) {
 				AccountId: accessName,
 			},
 			setupPatches: func() *gomonkey.Patches {
-				p := gomonkey.ApplyMethodReturn(secretInt, "Get", removeSecretData(utils.ALLETRA_MP_X10K_SNO), nil)
+				p := gomonkey.ApplyFuncReturn(getSecret, removeSecretData(utils.ALLETRA_MP_X10K_SNO), nil)
 				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
 				return p
 			},
@@ -738,7 +738,131 @@ func TestDriverGrantBucketAccess(t *testing.T) {
 				AccountId: accessName,
 			},
 			setupPatches: func() *gomonkey.Patches {
-				return nil
+				p := gomonkey.ApplyFuncReturn(getSecret, secret, nil)
+				return p
+			},
+			wantErr: true,
+		},
+		{
+			name: "Failure due to error fetching access token",
+			fields: fields{
+				log:             log,
+				K8sClientset:    &kubernetes.Clientset{},
+				BucketClientset: &bucketclientset.Clientset{},
+			},
+			args: args{
+				ctx: context.TODO(),
+				req: &cosi.DriverGrantBucketAccessRequest{
+					Name:               accessName,
+					AuthenticationType: cosi.AuthenticationType_Key,
+					Parameters: map[string]string{
+						"cosiUserSecretNamespace": namespace,
+						"cosiUserSecretName":      secretName,
+					},
+				},
+			},
+			want: &cosi.DriverGrantBucketAccessResponse{
+				AccountId: accessName,
+			},
+			setupPatches: func() *gomonkey.Patches {
+				p := gomonkey.ApplyFuncReturn(getSecret, secret, nil)
+				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
+				p = p.ApplyFuncReturn(getAccessToken, "", errors.New("failed to fetch access token"))
+				return p
+			},
+			wantErr: true,
+		},
+		{
+			name: "Failure due to empty access token",
+			fields: fields{
+				log:             log,
+				K8sClientset:    &kubernetes.Clientset{},
+				BucketClientset: &bucketclientset.Clientset{},
+			},
+			args: args{
+				ctx: context.TODO(),
+				req: &cosi.DriverGrantBucketAccessRequest{
+					Name:               accessName,
+					AuthenticationType: cosi.AuthenticationType_Key,
+					Parameters: map[string]string{
+						"cosiUserSecretNamespace": namespace,
+						"cosiUserSecretName":      secretName,
+					},
+				},
+			},
+			want: &cosi.DriverGrantBucketAccessResponse{
+				AccountId: accessName,
+			},
+			setupPatches: func() *gomonkey.Patches {
+				p := gomonkey.ApplyFuncReturn(getSecret, secret, nil)
+				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
+				p = p.ApplyFuncReturn(getAccessToken, "", nil)
+				return p
+			},
+			wantErr: true,
+		},
+		{
+			name: "Failure due to error creating DSCC API client",
+			fields: fields{
+				log:             log,
+				K8sClientset:    &kubernetes.Clientset{},
+				BucketClientset: &bucketclientset.Clientset{},
+			},
+			args: args{
+				ctx: context.TODO(),
+				req: &cosi.DriverGrantBucketAccessRequest{
+					Name:               accessName,
+					AuthenticationType: cosi.AuthenticationType_Key,
+					Parameters: map[string]string{
+						"cosiUserSecretNamespace": namespace,
+						"cosiUserSecretName":      secretName,
+					},
+				},
+			},
+			want: &cosi.DriverGrantBucketAccessResponse{
+				AccountId: accessName,
+			},
+			setupPatches: func() *gomonkey.Patches {
+				apiClient := iam.NewAPIClient("us1.xxxx.xxxxx.hpe.com", "dummytoken", "", "")
+				p := gomonkey.ApplyFuncReturn(getSecret, secret, nil)
+				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
+				p = p.ApplyFuncReturn(getAccessToken, "bearerdummytoken", nil)
+				p = p.ApplyFuncReturn(iam.NewAPIClient, apiClient)
+				p = p.ApplyMethodReturn(apiClient, "GetAPIClient", nil, errors.New("failed to create API client"))
+				return p
+			},
+			wantErr: true,
+		},
+		{
+			name: "Failure due to error creating DSCC Task API client",
+			fields: fields{
+				log:             log,
+				K8sClientset:    &kubernetes.Clientset{},
+				BucketClientset: &bucketclientset.Clientset{},
+			},
+			args: args{
+				ctx: context.TODO(),
+				req: &cosi.DriverGrantBucketAccessRequest{
+					Name:               accessName,
+					AuthenticationType: cosi.AuthenticationType_Key,
+					Parameters: map[string]string{
+						"cosiUserSecretNamespace": namespace,
+						"cosiUserSecretName":      secretName,
+					},
+				},
+			},
+			want: &cosi.DriverGrantBucketAccessResponse{
+				AccountId: accessName,
+			},
+			setupPatches: func() *gomonkey.Patches {
+				apiClient := iam.NewAPIClient("us1.xxxx.xxxxx.hpe.com", "dummytoken", "", "")
+				p := gomonkey.ApplyFuncReturn(getSecret, secret, nil)
+				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
+				p = p.ApplyFuncReturn(getAccessToken, "bearerdummytoken", nil)
+				p = p.ApplyFuncReturn(iam.NewAPIClient, apiClient)
+				p = p.ApplyMethodReturn(apiClient, "GetAPIClient", nil, nil)
+				p = p.ApplyMethodReturn(apiClient, "GetTaskAPIClient", nil, errors.New("failed to create Task API client"))
+				return p
 			},
 			wantErr: true,
 		},
@@ -848,7 +972,7 @@ func TestDriverRevokeBucketAccess(t *testing.T) {
 			},
 			want: &cosi.DriverRevokeBucketAccessResponse{},
 			setupPatches: func() *gomonkey.Patches {
-				p := gomonkey.ApplyMethodReturn(secretInt, "Get", secret, nil)
+				p := gomonkey.ApplyFuncReturn(getSecret, secret, nil)
 				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
 				p = p.ApplyFuncReturn(getAccessToken, "bearerdummyoxyzxxzzz12xxxx341111zzzzyyyyyyQQQQQHHHHH", nil)
 				p = p.ApplyFuncReturn(iam.NewS3Policy, policy)
@@ -878,7 +1002,7 @@ func TestDriverRevokeBucketAccess(t *testing.T) {
 			},
 			want: &cosi.DriverRevokeBucketAccessResponse{},
 			setupPatches: func() *gomonkey.Patches {
-				p := gomonkey.ApplyMethodReturn(secretInt, "Get", nil, errors.New("failed to get secret"))
+				p := gomonkey.ApplyFuncReturn(getSecret, nil, errors.New("failed to get secret"))
 				return p
 			},
 			wantErr: true,
@@ -899,7 +1023,7 @@ func TestDriverRevokeBucketAccess(t *testing.T) {
 			},
 			want: &cosi.DriverRevokeBucketAccessResponse{},
 			setupPatches: func() *gomonkey.Patches {
-				p := gomonkey.ApplyMethodReturn(secretInt, "Get", removeSecretData(utils.GLCP_USER_CLIENTID), nil)
+				p := gomonkey.ApplyFuncReturn(getSecret, removeSecretData(utils.GLCP_USER_CLIENTID), nil)
 				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
 				return p
 			},
@@ -921,7 +1045,7 @@ func TestDriverRevokeBucketAccess(t *testing.T) {
 			},
 			want: &cosi.DriverRevokeBucketAccessResponse{},
 			setupPatches: func() *gomonkey.Patches {
-				p := gomonkey.ApplyMethodReturn(secretInt, "Get", removeSecretData(utils.GLCP_USER_SECRET_KEY), nil)
+				p := gomonkey.ApplyFuncReturn(getSecret, removeSecretData(utils.GLCP_USER_SECRET_KEY), nil)
 				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
 				return p
 			},
@@ -943,7 +1067,7 @@ func TestDriverRevokeBucketAccess(t *testing.T) {
 			},
 			want: &cosi.DriverRevokeBucketAccessResponse{},
 			setupPatches: func() *gomonkey.Patches {
-				p := gomonkey.ApplyMethodReturn(secretInt, "Get", removeSecretData(utils.DSCC_ZONE), nil)
+				p := gomonkey.ApplyFuncReturn(getSecret, removeSecretData(utils.DSCC_ZONE), nil)
 				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
 				return p
 			},
@@ -965,7 +1089,7 @@ func TestDriverRevokeBucketAccess(t *testing.T) {
 			},
 			want: &cosi.DriverRevokeBucketAccessResponse{},
 			setupPatches: func() *gomonkey.Patches {
-				p := gomonkey.ApplyMethodReturn(secretInt, "Get", removeSecretData(utils.ALLETRA_MP_X10K_SNO), nil)
+				p := gomonkey.ApplyFuncReturn(getSecret, removeSecretData(utils.ALLETRA_MP_X10K_SNO), nil)
 				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
 				return p
 			},
@@ -987,7 +1111,107 @@ func TestDriverRevokeBucketAccess(t *testing.T) {
 			},
 			want: &cosi.DriverRevokeBucketAccessResponse{},
 			setupPatches: func() *gomonkey.Patches {
-				return nil
+				p := gomonkey.ApplyFuncReturn(getSecret, secret, nil)
+				return p
+			},
+			wantErr: true,
+		},
+		{
+			name: "Failure due to error fetching access token",
+			fields: fields{
+				log:             log,
+				K8sClientset:    &kubernetes.Clientset{},
+				BucketClientset: bcs,
+			},
+			args: args{
+				ctx: context.TODO(),
+				req: &cosi.DriverRevokeBucketAccessRequest{
+					AccountId: accessName,
+					BucketId:  bucketName,
+				},
+			},
+			want: &cosi.DriverRevokeBucketAccessResponse{},
+			setupPatches: func() *gomonkey.Patches {
+				p := gomonkey.ApplyFuncReturn(getSecret, secret, nil)
+				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
+				p = p.ApplyFuncReturn(getAccessToken, "", errors.New("failed to fetch access token"))
+				return p
+			},
+			wantErr: true,
+		},
+		{
+			name: "Failure due to empty access token",
+			fields: fields{
+				log:             log,
+				K8sClientset:    &kubernetes.Clientset{},
+				BucketClientset: bcs,
+			},
+			args: args{
+				ctx: context.TODO(),
+				req: &cosi.DriverRevokeBucketAccessRequest{
+					AccountId: accessName,
+					BucketId:  bucketName,
+				},
+			},
+			want: &cosi.DriverRevokeBucketAccessResponse{},
+			setupPatches: func() *gomonkey.Patches {
+				p := gomonkey.ApplyFuncReturn(getSecret, secret, nil)
+				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
+				p = p.ApplyFuncReturn(getAccessToken, "", nil)
+				return p
+			},
+			wantErr: true,
+		},
+		{
+			name: "Failure due to error creating DSCC API client",
+			fields: fields{
+				log:             log,
+				K8sClientset:    &kubernetes.Clientset{},
+				BucketClientset: bcs,
+			},
+			args: args{
+				ctx: context.TODO(),
+				req: &cosi.DriverRevokeBucketAccessRequest{
+					AccountId: accessName,
+					BucketId:  bucketName,
+				},
+			},
+			want: &cosi.DriverRevokeBucketAccessResponse{},
+			setupPatches: func() *gomonkey.Patches {
+				apiClient := iam.NewAPIClient("us1.xxxx.xxxxx.hpe.com", "dummytoken", "", "")
+				p := gomonkey.ApplyFuncReturn(getSecret, secret, nil)
+				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
+				p = p.ApplyFuncReturn(getAccessToken, "bearerdummytoken", nil)
+				p = p.ApplyFuncReturn(iam.NewAPIClient, apiClient)
+				p = p.ApplyMethodReturn(apiClient, "GetAPIClient", nil, errors.New("failed to create API client"))
+				return p
+			},
+			wantErr: true,
+		},
+		{
+			name: "Failure due to error creating DSCC Task API client",
+			fields: fields{
+				log:             log,
+				K8sClientset:    &kubernetes.Clientset{},
+				BucketClientset: bcs,
+			},
+			args: args{
+				ctx: context.TODO(),
+				req: &cosi.DriverRevokeBucketAccessRequest{
+					AccountId: accessName,
+					BucketId:  bucketName,
+				},
+			},
+			want: &cosi.DriverRevokeBucketAccessResponse{},
+			setupPatches: func() *gomonkey.Patches {
+				apiClient := iam.NewAPIClient("us1.xxxx.xxxxx.hpe.com", "dummytoken", "", "")
+				p := gomonkey.ApplyFuncReturn(getSecret, secret, nil)
+				p = p.ApplyFuncReturn(os.Getenv, "DUMMY_PROXY_URL")
+				p = p.ApplyFuncReturn(getAccessToken, "bearerdummytoken", nil)
+				p = p.ApplyFuncReturn(iam.NewAPIClient, apiClient)
+				p = p.ApplyMethodReturn(apiClient, "GetAPIClient", nil, nil)
+				p = p.ApplyMethodReturn(apiClient, "GetTaskAPIClient", nil, errors.New("failed to create Task API client"))
+				return p
 			},
 			wantErr: true,
 		},

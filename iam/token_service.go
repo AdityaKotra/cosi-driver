@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -34,16 +33,18 @@ type token_service struct {
 	apiCLientId     string
 	apiClientSecret string
 	proxy           string
+	onPremCloudCA   string // Base64 encoded CA certificate for on-premise DSCC
 	log             *logr.Logger
 }
 
 // Creates an instance of the TokenService struct
-func NewTokenService(glcpUrl, clientId, secret, proxy string, log *logr.Logger) *token_service {
+func NewTokenService(glcpUrl, clientId, secret, proxy, onPremCloudCA string, log *logr.Logger) *token_service {
 	return &token_service{
 		glcpCloudUrl:    glcpUrl,
 		apiCLientId:     clientId,
 		apiClientSecret: secret,
 		proxy:           proxy,
+		onPremCloudCA:   onPremCloudCA,
 		log:             log,
 	}
 }
@@ -72,6 +73,11 @@ func (t *token_service) GetAccessToken() (string, error) {
 	if err != nil {
 		t.log.Error(err, "Unable to retrieve token from `Token REST API response`")
 		return "", err
+	}
+
+	if res.StatusCode != http.StatusOK {
+		t.log.Error(fmt.Errorf("unexpected status code: %d", res.StatusCode), "Token REST API returned non-OK status", "statusCode", res.StatusCode, "response body", string(body))
+		return "", fmt.Errorf("token REST API returned status %d", res.StatusCode)
 	}
 
 	var o1 oauth2_token
@@ -103,13 +109,13 @@ func (t *token_service) PostRequest(uri string, body *bytes.Reader, headers map[
 	client := http.Client{
 		Timeout: HTTP_REQUEST_TIMEOUT,
 	}
-	if len(t.proxy) != 0 {
-		proxy, err := url.Parse(t.proxy)
-		if err != nil {
-			t.log.Error(err, "error parsing proxy: "+t.proxy)
-			return nil, err
-		}
-		client.Transport = &http.Transport{Proxy: http.ProxyURL(proxy)}
+
+	transport, err := buildHTTPTransport(t.proxy, t.onPremCloudCA)
+	if err != nil {
+		t.log.Error(err, "failed to build HTTP transport")
+		return nil, err
 	}
+	client.Transport = transport
+
 	return client.Do(req)
 }

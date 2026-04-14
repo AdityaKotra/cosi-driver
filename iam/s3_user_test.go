@@ -33,10 +33,8 @@ func Test_GetS3User(t *testing.T) {
 	user := getNewS3User()
 	name := user.name
 	systemId := user.systemId
-	request := sdk.ApiDeviceType7GetSingleUserRequest{}
 	gId := int32(1725948764)
 	t.Run("GetS3User successful", func(t *testing.T) {
-		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7GetSingleUser", request)
 		us := sdk.UserListDetails{
 			Generation: *sdk.NewNullableInt32(&gId),
 			Id:         &name,
@@ -44,7 +42,7 @@ func Test_GetS3User(t *testing.T) {
 			SystemUid:  &systemId,
 		}
 		r := http.Response{StatusCode: http.StatusOK}
-		patch = patch.ApplyMethodReturn(request, "Execute", &us, &r, nil)
+		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7GetSingleUserExecute", &us, &r, nil)
 		defer patch.Reset()
 		_, err := user.GetS3User()
 		if err != nil {
@@ -52,9 +50,8 @@ func Test_GetS3User(t *testing.T) {
 		}
 	})
 	t.Run("GetS3User failure", func(t *testing.T) {
-		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7GetSingleUser", request)
 		r := http.Response{StatusCode: http.StatusBadRequest}
-		patch = patch.ApplyMethodReturn(request, "Execute", nil, &r, nil)
+		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7GetSingleUserExecute", nil, &r, nil)
 		defer patch.Reset()
 		if _, err := user.GetS3User(); err == nil {
 			t.Errorf("FAILED: expected error not found")
@@ -66,11 +63,8 @@ func Test_UserExists(t *testing.T) {
 	user := getNewS3User()
 	name := user.name
 	systemId := user.systemId
-	request := sdk.ApiDeviceType7GetSingleUserRequest{}
 	gId := int32(1725948764)
 	t.Run("UserExists successful", func(t *testing.T) {
-		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7GetSingleUser", request)
-		request := sdk.ApiDeviceType7GetSingleUserRequest{}
 		ap := sdk.UserListDetails{
 			Generation: *sdk.NewNullableInt32(&gId),
 			Id:         &name,
@@ -78,7 +72,7 @@ func Test_UserExists(t *testing.T) {
 			SystemUid:  &systemId,
 		}
 		r := http.Response{StatusCode: http.StatusOK}
-		patch = patch.ApplyMethodReturn(request, "Execute", &ap, &r, nil)
+		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7GetSingleUserExecute", &ap, &r, nil)
 		defer patch.Reset()
 		isExist, err := user.UserExists()
 		if err != nil {
@@ -87,10 +81,9 @@ func Test_UserExists(t *testing.T) {
 		assert.Equal(t, isExist, true)
 	})
 	t.Run("UserExists false", func(t *testing.T) {
-		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7GetSingleUser", request)
 		body, _ := json.Marshal(resourceNotFoundResponse)
 		r := http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(bytes.NewBuffer(body))}
-		patch = patch.ApplyMethodReturn(request, "Execute", nil, &r, errors.New("404 Not Found"))
+		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7GetSingleUserExecute", nil, &r, errors.New("404 Not Found"))
 		defer patch.Reset()
 		isExist, err := user.UserExists()
 		if err != nil {
@@ -100,11 +93,10 @@ func Test_UserExists(t *testing.T) {
 	})
 
 	t.Run("InCorrect DSCC URL", func(t *testing.T) {
-		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7GetSingleUser", request)
 		body, _ := json.Marshal(badRoutingResponse)
 		r := http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(bytes.NewBuffer(body))}
 		e := errors.New("404 Not Found")
-		patch = patch.ApplyMethodReturn(request, "Execute", nil, &r, e)
+		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7GetSingleUserExecute", nil, &r, e)
 		defer patch.Reset()
 		isExist, err := user.UserExists()
 		if err == nil {
@@ -115,9 +107,8 @@ func Test_UserExists(t *testing.T) {
 	})
 
 	t.Run("Invalid URL with inline character", func(t *testing.T) {
-		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7GetSingleUser", request)
 		err := fmt.Errorf("parse \"https://%s\\n/api/v1/storage-systems/device-type7/XX0000000000XX/dummy-users/user_zzzz-xxxxx-yyyy-s3-user-11\": net/url: invalid control character in URL", host)
-		patch = patch.ApplyMethodReturn(request, "Execute", nil, nil, err)
+		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7GetSingleUserExecute", nil, nil, err)
 		defer patch.Reset()
 		isExist, e := user.UserExists()
 		if e == nil {
@@ -131,16 +122,13 @@ func Test_UserExists(t *testing.T) {
 
 func Test_CreateS3User(t *testing.T) {
 	user := getNewS3User()
-	request := sdk.ApiDeviceType7CreateUserRequest{}
 	t.Run("CreateS3User successful", func(t *testing.T) {
-		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7CreateUser", request)
-		patch = patch.ApplyMethodReturn(request, "UserDetails", request)
 		secretKey := "s3_user_key"
 		resp := sdk.UserResponseDetails{
 			SecretKey: &secretKey,
 		}
 		r := http.Response{StatusCode: http.StatusCreated}
-		patch = patch.ApplyMethodReturn(request, "Execute", &resp, &r, nil)
+		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7CreateUserExecute", &resp, &r, nil)
 		defer patch.Reset()
 		secret, err := user.CreateS3User()
 		if err != nil {
@@ -149,10 +137,8 @@ func Test_CreateS3User(t *testing.T) {
 		assert.Equal(t, secret, secretKey)
 	})
 	t.Run("CreateS3User failure", func(t *testing.T) {
-		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7CreateUser", request)
-		patch = patch.ApplyMethodReturn(request, "UserDetails", request)
 		r := http.Response{StatusCode: http.StatusBadRequest}
-		patch = patch.ApplyMethodReturn(request, "Execute", nil, &r, nil)
+		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7CreateUserExecute", nil, &r, nil)
 		defer patch.Reset()
 		if _, err := user.CreateS3User(); err == nil {
 			t.Errorf("FAILED: expected error not found")
@@ -162,16 +148,13 @@ func Test_CreateS3User(t *testing.T) {
 
 func Test_ResetPassword(t *testing.T) {
 	user := getNewS3User()
-	request := sdk.ApiDeviceType7EditUserRequest{}
 	t.Run("ResetPassword successful", func(t *testing.T) {
-		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7EditUser", request)
-		patch = patch.ApplyMethodReturn(request, "UserDetailsEdit", request)
 		secretKey := "s3_user_key"
 		resp := sdk.UserResponseDetails{
 			SecretKey: &secretKey,
 		}
 		r := http.Response{StatusCode: http.StatusCreated}
-		patch = patch.ApplyMethodReturn(request, "Execute", &resp, &r, nil)
+		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7EditUserExecute", &resp, &r, nil)
 		defer patch.Reset()
 		secret, err := user.ResetPassword()
 		if err != nil {
@@ -180,10 +163,8 @@ func Test_ResetPassword(t *testing.T) {
 		assert.Equal(t, secret, secretKey)
 	})
 	t.Run("ResetPassword failure", func(t *testing.T) {
-		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7EditUser", request)
-		patch = patch.ApplyMethodReturn(request, "UserDetailsEdit", request)
 		r := http.Response{StatusCode: http.StatusBadRequest}
-		patch = patch.ApplyMethodReturn(request, "Execute", nil, &r, nil)
+		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7EditUserExecute", nil, &r, nil)
 		defer patch.Reset()
 		if _, err := user.ResetPassword(); err == nil {
 			t.Errorf("FAILED: expected error not found")
@@ -193,15 +174,11 @@ func Test_ResetPassword(t *testing.T) {
 
 func Test_ApplyPolicy(t *testing.T) {
 	user := getNewS3User()
-	request := sdk.ApiApplyPolicyRequest{}
 	policyName := "bucket1_policy"
 	t.Run("ApplyPolicy successful", func(t *testing.T) {
-		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "ApplyPolicy", request)
-		patch = patch.ApplyMethodReturn(request, "ApplyPolicy", request)
 		taskUi := GetMockTaskResponseUi()
-
 		r := http.Response{StatusCode: http.StatusAccepted}
-		patch = patch.ApplyMethodReturn(request, "Execute", taskUi, &r, nil)
+		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "ApplyPolicyExecute", taskUi, &r, nil)
 		defer patch.Reset()
 		taskResp, err := user.ApplyPolicy([]string{policyName})
 		if err != nil {
@@ -210,10 +187,8 @@ func Test_ApplyPolicy(t *testing.T) {
 		assert.Equal(t, taskResp, taskUi)
 	})
 	t.Run("ApplyPolicy failure", func(t *testing.T) {
-		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "ApplyPolicy", request)
-		patch = patch.ApplyMethodReturn(request, "ApplyPolicy", request)
 		r := http.Response{StatusCode: http.StatusBadRequest}
-		patch = patch.ApplyMethodReturn(request, "Execute", nil, &r, nil)
+		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "ApplyPolicyExecute", nil, &r, nil)
 		defer patch.Reset()
 		if _, err := user.ApplyPolicy([]string{policyName}); err == nil {
 			t.Errorf("FAILED: expected error not found")
@@ -223,12 +198,10 @@ func Test_ApplyPolicy(t *testing.T) {
 
 func Test_DeleteS3User(t *testing.T) {
 	user := getNewS3User()
-	request := sdk.ApiDeviceType7DeleteUserByIdRequest{}
 	t.Run("DeleteS3User successful", func(t *testing.T) {
-		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7DeleteUserById", request)
 		taskUi := GetMockTaskResponseUi()
 		r := http.Response{StatusCode: http.StatusAccepted}
-		patch = patch.ApplyMethodReturn(request, "Execute", taskUi, &r, nil)
+		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7DeleteUserByIdExecute", taskUi, &r, nil)
 		defer patch.Reset()
 		taskResp, err := user.DeleteS3User()
 		if err != nil {
@@ -237,9 +210,8 @@ func Test_DeleteS3User(t *testing.T) {
 		assert.DeepEqual(t, taskResp, taskUi)
 	})
 	t.Run("DeleteS3User failure", func(t *testing.T) {
-		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7DeleteUserById", request)
 		r := http.Response{StatusCode: http.StatusBadRequest}
-		patch = patch.ApplyMethodReturn(request, "Execute", nil, &r, nil)
+		patch := gomonkey.ApplyMethodReturn(user.client.ObjectstoreIdentitiesAPI, "DeviceType7DeleteUserByIdExecute", nil, &r, nil)
 		defer patch.Reset()
 		if _, err := user.DeleteS3User(); err == nil {
 			t.Errorf("FAILED: expected error not found")
@@ -250,6 +222,6 @@ func Test_DeleteS3User(t *testing.T) {
 func getNewS3User() *s3user {
 	token := "bearerdummyoxyzxxzzz12xxxx341111zzzzyyyyyyQQQQQHHHHH"
 	userName := "bucket1_user"
-	apiClient, _ := NewAPIClient(host, token, proxy).GetAPIClient()
+	apiClient, _ := NewAPIClient(host, token, proxy, "").GetAPIClient()
 	return NewS3User(userName, systemId, apiClient, context.Background())
 }

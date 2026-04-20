@@ -371,19 +371,43 @@ func (c *S3Client) CreateBucket(ctx context.Context, bucketName string, req util
 
 // DeleteBucket deletes a bucket via direct REST API call.
 func (c *S3Client) DeleteBucket(ctx context.Context, bucketName string) error {
+	var logger logr.Logger
+	if l, ok := ctx.Value(utils.LoggerKey).(*logr.Logger); ok && l != nil {
+		logger = *l
+	}
+
 	url := fmt.Sprintf("%s/%s", c.BaseURL, bucketName)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to create HTTP request for delete bucket", "bucketName", bucketName)
+		}
 		return err
 	}
-	httpReq.SetBasicAuth(c.AccessKey, c.SecretKey)
+
+	// Sign the request using AWS Signature Version 4
+	service := "s3"
+	err = utils.SignAWSV4(httpReq, c.AccessKey, c.SecretKey, "", service, nil)
+	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "Failed to sign delete bucket request with AWS4-HMAC-SHA256", "bucketName", bucketName)
+		}
+		return err
+	}
+
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
+		if logger.GetSink() != nil {
+			logger.Error(err, "HTTP request to delete bucket failed", "bucketName", bucketName, "url", url)
+		}
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
+		if logger.GetSink() != nil {
+			logger.Error(fmt.Errorf("unexpected status code: %d", resp.StatusCode), "Failed to delete bucket", "bucketName", bucketName, "status", resp.StatusCode, "response", string(body), "url", url)
+		}
 		return fmt.Errorf("failed to delete bucket: %s", string(body))
 	}
 	return nil

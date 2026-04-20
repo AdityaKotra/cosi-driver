@@ -115,7 +115,7 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 		if strings.Contains(err.Error(), "already exists") {
 			return nil, status.Error(codes.AlreadyExists, "bucket already exists with different parameters")
 		}
-		return nil, status.Error(codes.Internal, "failed to create bucket due to an internal error")
+		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to create bucket: %v", err))
 	}
 
 	// If locking is enabled, set object lock configuration
@@ -167,7 +167,7 @@ func (s *Server) DriverDeleteBucket(ctx context.Context, req *cosi.DriverDeleteB
 
 	// Attempt bucket deletion
 	if err = s3c.DeleteBucket(ctx, bucketName); err != nil {
-		return nil, status.Error(codes.Internal, "failed to delete bucket due to an internal error")
+		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to delete bucket: %v", err))
 	}
 
 	return &cosi.DriverDeleteBucketResponse{}, nil
@@ -220,7 +220,7 @@ func (s *Server) DriverGrantBucketAccess(ctx context.Context, req *cosi.DriverGr
 
 	secretKey, endpoint, err := createBucketAccess(ctx, userName, policyName, bucketName, secret.Data)
 	if err != nil {
-		eMsg = fmt.Sprintf("error while creating access for bucket %s.", bucketName)
+		eMsg = fmt.Sprintf("error while creating access for bucket %s: %v", bucketName, err)
 		s.log.Error(err, eMsg)
 		return &cosi.DriverGrantBucketAccessResponse{
 			AccountId:   bucketAccessName,
@@ -287,7 +287,7 @@ func (s *Server) DriverRevokeBucketAccess(ctx context.Context, req *cosi.DriverR
 	}
 
 	if err = deleteBucketAccess(ctx, userName, policyName, bucketName, secret.Data); err != nil {
-		eMsg = fmt.Sprintf("error while deleting access for bucket %s", bucketName)
+		eMsg = fmt.Sprintf("error while deleting access for bucket %s: %v", bucketName, err)
 		s.log.Error(err, eMsg)
 		return &cosi.DriverRevokeBucketAccessResponse{}, status.Error(codes.Internal, eMsg)
 	}

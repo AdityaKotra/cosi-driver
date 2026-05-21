@@ -89,25 +89,12 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 		return nil, err
 	}
 
-	// --- Modular parameter parsing ---
-	versioning := parseVersioning(param)
-	compression := parseCompression(param)
-	locking, retentionMode, objectLockDays, objectLockYears := parseObjectLock(param)
+	// --- Parameter parsing (all enum/format validation lives in utils) ---
+	bucketReq, err := parseBucketParams(param)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	tags := parseBucketTags(param)
-
-	// Enforce: object locking only allowed if versioning is enabled
-	if locking == string(utils.FeatureEnabled) && versioning != string(utils.FeatureEnabled) {
-		return nil, status.Error(codes.InvalidArgument, "Object locking requires versioning to be enabled.")
-	}
-
-	bucketReq := utils.BucketRequest{
-		Compression:     compression,
-		Versioning:      versioning,
-		Locking:         locking,
-		RetentionMode:   retentionMode,
-		ObjectLockDays:  objectLockDays,
-		ObjectLockYears: objectLockYears,
-	}
 
 	// Attempt bucket creation (idempotent: handle "already exists" inside CreateBucket)
 	if err = s3c.CreateBucket(ctx, bucketName, bucketReq); err != nil {
@@ -115,8 +102,8 @@ func (s *Server) DriverCreateBucket(ctx context.Context, req *cosi.DriverCreateB
 	}
 
 	// If locking is enabled, set object lock configuration
-	if locking == string(utils.FeatureEnabled) {
-		err = s3c.SetObjectLockConfiguration(ctx, bucketName, locking, retentionMode, objectLockDays, objectLockYears)
+	if bucketReq.Locking == utils.FeatureEnabled {
+		err = s3c.SetObjectLockConfiguration(ctx, bucketName, string(bucketReq.Locking), string(bucketReq.RetentionMode), bucketReq.ObjectLockDays, bucketReq.ObjectLockYears)
 		if err != nil {
 			s.log.Error(err, "failed to set object lock configuration")
 			return nil, utils.ToGRPCStatusError("failed to set object lock configuration", err)
@@ -301,26 +288,12 @@ func (c *S3Client) CreateBucket(ctx context.Context, bucketName string, req util
 
 	url := fmt.Sprintf("%s/%s", c.BaseURL, bucketName)
 
-	// Build the S3 JSON payload
-	payloadStruct := struct {
-		Compression     bool   `json:"Compression"`
-		Versioning      string `json:"Versioning,omitempty"`
-		Locking         string `json:"Locking,omitempty"`
-		RetentionMode   string `json:"RetentionMode,omitempty"`
-		ObjectLockDays  int    `json:"ObjectLockDays,omitempty"`
-		ObjectLockYears int    `json:"ObjectLockYears,omitempty"`
-	}{
-		Compression:     req.Compression,
-		Versioning:      req.Versioning,
-		Locking:         req.Locking,
-		RetentionMode:   req.RetentionMode,
-		ObjectLockDays:  req.ObjectLockDays,
-		ObjectLockYears: req.ObjectLockYears,
-	}
-	payload, err := json.Marshal(payloadStruct)
+	// utils.BucketRequest already has the exact field set and JSON tags
+	// expected by the HomeFleet wire format, so it can be marshalled directly.
+	payload, err := json.Marshal(req)
 	if err != nil {
 		if logger.GetSink() != nil {
-			logger.Error(err, "Failed to marshal bucket request payload", "bucketName", bucketName, "payload", payloadStruct)
+			logger.Error(err, "Failed to marshal bucket request payload", "bucketName", bucketName, "payload", req)
 		}
 		return err
 	}
@@ -479,55 +452,80 @@ func (c *S3Client) SetObjectLockConfiguration(ctx context.Context, bucketName, e
 }
 
 // --- Modular parameter parsing helpers ---
-// parseVersioning parses the versioning parameter and returns its value.
-func parseVersioning(param map[string]string) string {
-	for k, v := range param {
-		if strings.EqualFold(k, "versioning") && strings.EqualFold(v, string(utils.FeatureEnabled)) {
-			return string(utils.FeatureEnabled)
-		}
+
+// validateBucketSemantics enforces every cross-field invariant on
+// BucketClass parameters in one place. Field-level validation (enum
+// membership, regex form) lives in the typed helpers in the utils package;
+// the rules here describe how those validated fields must combine.
+//
+// Returning the rule violations explicitly — rather than silently dropping
+// orphan settings — prevents the "I configured retention but the bucket
+// doesn't have it" class of misconfiguration.
+func validateBucketSemantics(versioning, locking utils.Feature,
+	retentionMode utils.RetentionMode, interval utils.RetentionInterval) error {
+
+	hasRetention := retentionMode != "" || interval != ""
+	switch {
+	case locking == utils.FeatureEnabled && versioning != utils.FeatureEnabled:
+		return errors.New("Invalid bucket parameters: object locking requires versioning; enable versioning in BucketClass and recreate BucketClaim")
+	case hasRetention && locking != utils.FeatureEnabled:
+		return errors.New("Invalid bucket parameters: retentionMode and defaultRetentionInterval require object locking; enable locking in BucketClass and recreate BucketClaim")
+	case locking == utils.FeatureEnabled && (retentionMode == "" || interval == ""):
+		return errors.New("Invalid bucket parameters: object locking requires retentionMode and defaultRetentionInterval; set both in BucketClass and recreate BucketClaim")
 	}
-	return string(utils.FeatureDisabled)
+	return nil
 }
 
-// parseCompression parses the compression parameter and returns its value as a boolean.
-func parseCompression(param map[string]string) bool {
-	for k, v := range param {
-		if strings.EqualFold(k, "compression") {
-			return strings.EqualFold(v, string(utils.FeatureEnabled))
-		}
+// parseBucketParams parses every BucketClass parameter consumed by bucket
+// creation into a single validated utils.BucketRequest. All field-level
+// validation (enum membership for `versioning` / `compression` / `locking` /
+// `retentionMode`, regex form for `defaultRetentionInterval`) lives in the
+// typed helpers in the utils package; this function only stitches them
+// together, applies the `versioning` default, runs cross-field semantic
+// validation via validateBucketSemantics, and finally decomposes the
+// interval into the (days, years) pair the backend consumes.
+//
+// Returning a populated utils.BucketRequest keeps the callers free of
+// per-field plumbing and gives a single place to add future parameters.
+func parseBucketParams(param map[string]string) (utils.BucketRequest, error) {
+	versioning, err := utils.FeatureFromParams(param, "versioning")
+	if err != nil {
+		return utils.BucketRequest{}, err
 	}
-	return false // default to false if not specified
-}
-
-// parseObjectLock parses the object lock parameters and returns the locking configuration.
-func parseObjectLock(param map[string]string) (locking, retentionMode string, days, years int) {
-	for k, v := range param {
-		switch strings.ToLower(k) {
-		case "locking":
-			if strings.EqualFold(v, string(utils.FeatureEnabled)) {
-				locking = string(utils.FeatureEnabled)
-			}
-		case "retentionmode":
-			retentionMode = v
-		case "defaultretentioninterval":
-			// Parse format like 1d, 1m, 1y
-			if len(v) > 1 {
-				numPart := v[:len(v)-1]
-				unit := v[len(v)-1]
-				var n int
-				fmt.Sscanf(numPart, "%d", &n)
-				switch unit {
-				case 'd':
-					days = n
-				case 'm':
-					days = n * 30 // treat 1m as 30 days
-				case 'y':
-					years = n
-				}
-			}
-		}
+	if versioning == "" {
+		versioning = utils.FeatureDisabled
 	}
-	return
+	compression, err := utils.FeatureFromParams(param, "compression")
+	if err != nil {
+		return utils.BucketRequest{}, err
+	}
+	locking, err := utils.FeatureFromParams(param, "locking")
+	if err != nil {
+		return utils.BucketRequest{}, err
+	}
+	retentionMode, err := utils.RetentionModeFromParams(param, "retentionMode")
+	if err != nil {
+		return utils.BucketRequest{}, err
+	}
+	interval, err := utils.RetentionIntervalFromParams(param, "defaultRetentionInterval")
+	if err != nil {
+		return utils.BucketRequest{}, err
+	}
+	if err := validateBucketSemantics(versioning, locking, retentionMode, interval); err != nil {
+		return utils.BucketRequest{}, err
+	}
+	days, years, err := interval.ToDaysYears()
+	if err != nil {
+		return utils.BucketRequest{}, err
+	}
+	return utils.BucketRequest{
+		Compression:     compression,
+		Versioning:      versioning,
+		Locking:         locking,
+		RetentionMode:   retentionMode,
+		ObjectLockDays:  days,
+		ObjectLockYears: years,
+	}, nil
 }
 
 // parseBucketTags parses the bucket tags from the parameters and returns them as a map.

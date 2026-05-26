@@ -52,6 +52,17 @@ func (u *s3user) UserExists() (bool, error) {
 		return false, err
 	} else if ap != nil && err == nil {
 		return true, nil
+	} else if r != nil {
+		e, body := getResponseErrorCode(u.context, r)
+		if e.GetErrorCode() == string(DOWNSTREAM_SERVICE_ERROR) {
+			log.Error(err, "Downstream service error from DSCC;"+
+				" verify GLCP credentials, workspace in mounted"+
+				" secret, and GLCP_COMMON_CLOUD in COSI pod",
+				"response body", body)
+			return false, err
+		} else {
+			log.Error(err, "Received error while fetching user details from DSCC.", "statusCode", r.StatusCode, "status", r.Status, "response body", body)
+		}
 	}
 	return false, err
 }
@@ -59,13 +70,18 @@ func (u *s3user) UserExists() (bool, error) {
 // Creates a user with the passed name in DSCC
 // returns the new secret key of the user
 func (u *s3user) CreateS3User() (string, error) {
+	log := utils.GetLoggerFromContext(u.context)
 	userDetails := *sdk.NewUserDetails(u.name)
 	resp, r, err := u.client.ObjectstoreIdentitiesAPI.DeviceType7CreateUser(u.context, u.systemId).
 		UserDetails(userDetails).Execute()
 	if err != nil {
+		if r != nil {
+			_, body := getResponseErrorCode(u.context, r)
+			log.Error(err, "Failed to create S3 user in DSCC", "user", utils.MaskName(u.name), "statusCode", r.StatusCode, "status", r.Status, "response body", body)
+		}
 		return "", err
 	} else if r.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("request failed while creating s3 user %s, err: %v", u.name, r)
+		return "", fmt.Errorf("request failed while creating s3 user %s, err: %v", utils.MaskName(u.name), r)
 	}
 	return resp.GetSecretKey(), nil
 }
@@ -79,7 +95,7 @@ func (u *s3user) ResetPassword() (string, error) {
 	if err != nil {
 		return "", err
 	} else if r.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("request failed while resetting s3 user %s password, err: %v", u.name, r)
+		return "", fmt.Errorf("request failed while resetting s3 user %s password, err: %v", utils.MaskName(u.name), r)
 	}
 	return resp.GetSecretKey(), nil
 }
@@ -92,7 +108,7 @@ func (u *s3user) ApplyPolicy(policies []string) (*sdk.TaskResponseUi, error) {
 
 	taskUI, r, err := u.client.ObjectstoreIdentitiesAPI.ApplyPolicy(u.context, u.systemId).ApplyPolicy(policy).Execute()
 	if err == nil && (r.StatusCode != http.StatusAccepted || taskUI.GetStatus() != string(SUBMITTED)) {
-		err = fmt.Errorf("request failed while applying policies %v, to the user %s, err: %v", policies, u.name, r)
+		err = fmt.Errorf("request failed while applying policies %v, to the user %s, err: %v", policies, utils.MaskName(u.name), r)
 	}
 	return taskUI, err
 }
@@ -103,7 +119,7 @@ func (u *s3user) ApplyPolicy(policies []string) (*sdk.TaskResponseUi, error) {
 func (u *s3user) DeleteS3User() (*sdk.TaskResponseUi, error) {
 	taskUI, r, err := u.client.ObjectstoreIdentitiesAPI.DeviceType7DeleteUserById(u.context, u.systemId, u.name).Execute()
 	if err == nil && (r.StatusCode != http.StatusAccepted || taskUI.GetStatus() != string(SUBMITTED)) {
-		err = fmt.Errorf("request failed while delete s3 user %s, err: %v", u.name, r)
+		err = fmt.Errorf("request failed while delete s3 user %s, err: %v", utils.MaskName(u.name), r)
 	}
 	return taskUI, err
 }

@@ -18,6 +18,7 @@ const (
 	//KEYS in glcp secret
 	GLCP_USER_CLIENTID   = "glcpUserClientId"
 	GLCP_USER_SECRET_KEY = "glcpUserSecretKey"
+	GLCP_WORKSPACE_ID    = "glcpWorkspaceId"
 	GLCP_COMMON_CLOUD    = "GLCP_COMMON_CLOUD"
 	DSCC_ZONE            = "dsccZone"
 	ALLETRA_MP_X10K_SNO  = "clusterSerialNumber"
@@ -31,6 +32,7 @@ const (
 type IAMCredentials struct {
 	GLCPUser          string
 	GLCPUserSecretKey string
+	GLCPWorkspaceId   string
 	GLCPCommonCloud   string
 	DSCCZone          string
 	SystemId          string
@@ -414,4 +416,28 @@ func (r RetentionInterval) ToDaysYears() (days, years int, err error) {
 	return 0, 0, fmt.Errorf(
 		"invalid RetentionInterval %q: unrecognised unit %q",
 		string(r), m[2])
+}
+
+// MaskName masks the UUID portion of a name (e.g. user_ba-edummy-forthe-sake-ofex-ampled918fa73)
+// keeping the prefix and last 4 characters visible, replacing the rest with 'x'.
+// Example: "user_ba-adummy-forthe-sake-ofex-mplein918fa73" -> "user_ba-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxfa73"
+func MaskName(name string) string {
+	l := len(name)
+	if l <= 1 {
+		return name
+	}
+	if l > 6 {
+		return replaceWithXx(name, 2, l-4)
+	}
+	return replaceWithXx(name, 0, l-1)
+}
+
+func replaceWithXx(str string, begin, end int) string {
+	chars := strings.Split(str, "")
+	for i, v := range chars[begin:end] {
+		if v != "-" && v != "_" {
+			chars[i+begin] = "x"
+		}
+	}
+	return strings.Join(chars, "")
 }

@@ -165,12 +165,13 @@ func (s *Server) DriverGrantBucketAccess(ctx context.Context, req *cosi.DriverGr
 
 	// Get the bucket access name from the request
 	bucketAccessName := req.Name
+	maskedBucketAccessName := utils.MaskName(bucketAccessName)
 
 	if req.AuthenticationType != cosi.AuthenticationType_Key {
 		err := fmt.Errorf("%s authenticationType alone is supported by COSI driver", cosi.AuthenticationType_Key)
 		s.log.Error(err, "Unsupported authenticationType")
 		return &cosi.DriverGrantBucketAccessResponse{
-			AccountId:   bucketAccessName,
+			AccountId:   maskedBucketAccessName,
 			Credentials: nil,
 		}, utils.ToGRPCStatusError("Unsupported authenticationType", err)
 	}
@@ -186,7 +187,7 @@ func (s *Server) DriverGrantBucketAccess(ctx context.Context, req *cosi.DriverGr
 		eMsg = "error while retrieving details of secret used in bucket access class"
 		s.log.Error(err, eMsg)
 		return &cosi.DriverGrantBucketAccessResponse{
-			AccountId:   bucketAccessName,
+			AccountId:   maskedBucketAccessName,
 			Credentials: nil,
 		}, utils.ToGRPCStatusError(eMsg, err)
 	}
@@ -196,7 +197,7 @@ func (s *Server) DriverGrantBucketAccess(ctx context.Context, req *cosi.DriverGr
 		eMsg = fmt.Sprintf("error while fetching secret %s used in bucket access class", name)
 		s.log.Error(err, eMsg)
 		return &cosi.DriverGrantBucketAccessResponse{
-			AccountId:   bucketAccessName,
+			AccountId:   maskedBucketAccessName,
 			Credentials: nil,
 		}, utils.ToGRPCStatusError(eMsg, err)
 	}
@@ -206,7 +207,7 @@ func (s *Server) DriverGrantBucketAccess(ctx context.Context, req *cosi.DriverGr
 		eMsg = fmt.Sprintf("error while creating access for bucket %s", bucketName)
 		s.log.Error(err, eMsg)
 		return &cosi.DriverGrantBucketAccessResponse{
-			AccountId:   bucketAccessName,
+			AccountId:   maskedBucketAccessName,
 			Credentials: nil,
 		}, utils.ToGRPCStatusError(eMsg, err)
 	}
@@ -226,7 +227,7 @@ func (s *Server) DriverGrantBucketAccess(ctx context.Context, req *cosi.DriverGr
 	credMap["s3"] = cred
 
 	return &cosi.DriverGrantBucketAccessResponse{
-		AccountId:   bucketAccessName,
+		AccountId:   maskedBucketAccessName,
 		Credentials: credMap,
 	}, status.Error(codes.OK, "Bucket access grant successfully completed")
 }
@@ -243,7 +244,8 @@ func (s *Server) DriverRevokeBucketAccess(ctx context.Context, req *cosi.DriverR
 	policyName := utils.ACCESS_POLICY_PREFIX + accessName
 	var eMsg string
 
-	s.log.Info(fmt.Sprintf("BucketName %s, AccountId %s", bucketName, accessName))
+	maskedAccessName := utils.MaskName(accessName)
+	s.log.Info(fmt.Sprintf("BucketName %s, AccountId %s", bucketName, maskedAccessName))
 	// Get the bucket object
 	bucket, err := s.BucketClientset.ObjectstorageV1alpha1().Buckets().Get(ctx, bucketName, metav1.GetOptions{})
 	if err != nil {
@@ -266,6 +268,7 @@ func (s *Server) DriverRevokeBucketAccess(ctx context.Context, req *cosi.DriverR
 	secret, err := getSecret(s.K8sClientset, ctx, name, namespace)
 	if err != nil || secret == nil || secret.Data == nil || len(secret.Data) == 0 {
 		eMsg = fmt.Sprintf("error while fetching secret %s used in bucket access class", name)
+		s.log.Error(err, eMsg)
 		return &cosi.DriverRevokeBucketAccessResponse{}, utils.ToGRPCStatusError(eMsg, err)
 	}
 
@@ -720,13 +723,17 @@ func getGLCPCDetails(data map[string][]byte) (*utils.IAMCredentials, error) {
 	glcpCommonCloud := os.Getenv(utils.GLCP_COMMON_CLOUD)
 
 	if len(glcpCommonCloud) == 0 {
-		return nil, fmt.Errorf("unable to fetch GLCP cloud URL form environment")
+		return nil, fmt.Errorf("unable to fetch GLCP cloud URL from environment")
 	}
 	glcpUserClientId, err := getData(utils.GLCP_USER_CLIENTID)
 	if err != nil {
 		return nil, err
 	}
 	glcpUserSecretKey, err := getData(utils.GLCP_USER_SECRET_KEY)
+	if err != nil {
+		return nil, err
+	}
+	glcpWorkspaceId, err := getData(utils.GLCP_WORKSPACE_ID)
 	if err != nil {
 		return nil, err
 	}
@@ -749,6 +756,7 @@ func getGLCPCDetails(data map[string][]byte) (*utils.IAMCredentials, error) {
 	return &utils.IAMCredentials{
 		GLCPUser:          glcpUserClientId,
 		GLCPUserSecretKey: glcpUserSecretKey,
+		GLCPWorkspaceId:   glcpWorkspaceId,
 		GLCPCommonCloud:   glcpCommonCloud,
 		DSCCZone:          dsccZone,
 		SystemId:          clusterSerialNumber,
@@ -791,7 +799,7 @@ func createBucketAccess(ctx context.Context, userName, policyName, bucketName st
 	// Create S3 User
 	u := iam.NewS3User(userName, credentials.SystemId, client, ctx)
 
-	log.Info(fmt.Sprintf("Checking if s3 user %s, exists in DSCC", userName))
+	log.Info(fmt.Sprintf("Checking if s3 user %s, exists in DSCC", utils.MaskName(userName)))
 	exist, err := u.UserExists()
 	if err != nil {
 		log.Error(err, "error fetching user details from DSCC. Please verify the connectivity with DSCC, ", credentials.DSCCZone)
@@ -800,10 +808,10 @@ func createBucketAccess(ctx context.Context, userName, policyName, bucketName st
 
 	var secretKey string
 	if !exist {
-		log.Info(fmt.Sprintf("Creating s3 user %s, in DSCC", userName))
+		log.Info(fmt.Sprintf("Creating s3 user %s, in DSCC", utils.MaskName(userName)))
 		secretKey, err = u.CreateS3User()
 	} else {
-		log.Info(fmt.Sprintf("S3 user %s, is seen to be existing in DSCC, resetting password & reusing it for bucket access", userName))
+		log.Info(fmt.Sprintf("S3 user %s, is seen to be existing in DSCC, resetting password & reusing it for bucket access", utils.MaskName(userName)))
 		secretKey, err = u.ResetPassword()
 	}
 	if err != nil || len(secretKey) == 0 {
@@ -813,7 +821,7 @@ func createBucketAccess(ctx context.Context, userName, policyName, bucketName st
 	// Create S3 Access policy
 	p := iam.NewS3Policy(policyName, bucketName, credentials.SystemId, client, ctx)
 
-	log.Info(fmt.Sprintf("Checking if access policy %s, exists in DSCC", policyName))
+	log.Info(fmt.Sprintf("Checking if access policy %s, exists in DSCC", utils.MaskName(policyName)))
 	exist, err = p.PolicyExists()
 	if err != nil {
 		log.Error(err, "error fetching access policy details from DSCC. Please verify the connectivity with DSCC, ", credentials.DSCCZone)
@@ -821,7 +829,7 @@ func createBucketAccess(ctx context.Context, userName, policyName, bucketName st
 	}
 
 	if !exist {
-		log.Info(fmt.Sprintf("Creating access policy %s, in DSCC", policyName))
+		log.Info(fmt.Sprintf("Creating access policy %s, in DSCC", utils.MaskName(policyName)))
 		task, err := p.CreateS3AccessPolicy()
 		if task == nil && err != nil {
 			log.Error(err, "error while creating s3 access policy in DSCC.")
@@ -837,11 +845,11 @@ func createBucketAccess(ctx context.Context, userName, policyName, bucketName st
 
 		}
 	} else {
-		log.Info(fmt.Sprintf("Access policy %s, is seen to be existing in DSCC, reusing it for bucket access", policyName))
+		log.Info(fmt.Sprintf("Access policy %s, is seen to be existing in DSCC, reusing it for bucket access", utils.MaskName(policyName)))
 	}
 
 	// Applying access policy to S3 user
-	log.Info(fmt.Sprintf("Applying access policy %s to s3 user %s", policyName, userName))
+	log.Info(fmt.Sprintf("Applying access policy %s to s3 user %s", utils.MaskName(policyName), utils.MaskName(userName)))
 	task, err := u.ApplyPolicy([]string{policyName})
 	if task == nil && err != nil {
 		log.Error(err, "error while applying policy to user.")
@@ -895,7 +903,7 @@ func deleteBucketAccess(ctx context.Context, userName, policyName, bucketName st
 
 	u := iam.NewS3User(userName, credentials.SystemId, client, ctx)
 
-	log.Info(fmt.Sprintf("Checking if s3 user %s, exists in DSCC", userName))
+	log.Info(fmt.Sprintf("Checking if s3 user %s, exists in DSCC", utils.MaskName(userName)))
 	exist, err := u.UserExists()
 	if err != nil {
 		log.Error(err, fmt.Sprintf("error fetching user details from DSCC %s. Please verify the connectivity with DSCC.", credentials.DSCCZone))
@@ -903,7 +911,7 @@ func deleteBucketAccess(ctx context.Context, userName, policyName, bucketName st
 	}
 
 	if exist {
-		log.Info(fmt.Sprintf("Deleting S3 user %s", userName))
+		log.Info(fmt.Sprintf("Deleting S3 user %s", utils.MaskName(userName)))
 		task, err := u.DeleteS3User()
 		if task == nil && err != nil {
 			log.Error(err, "error while deleting s3 user.")
@@ -920,12 +928,12 @@ func deleteBucketAccess(ctx context.Context, userName, policyName, bucketName st
 		}
 
 	} else {
-		log.Info(fmt.Sprintf("S3 user %s, doesn't exist in DSCC", userName))
+		log.Info(fmt.Sprintf("S3 user %s, doesn't exist in DSCC", utils.MaskName(userName)))
 	}
 
 	p := iam.NewS3Policy(policyName, bucketName, credentials.SystemId, client, ctx)
 
-	log.Info(fmt.Sprintf("Checking if s3 access policy %s, exists in DSCC", policyName))
+	log.Info(fmt.Sprintf("Checking if s3 access policy %s, exists in DSCC", utils.MaskName(policyName)))
 	exist, err = p.PolicyExists()
 	if err != nil {
 		log.Error(err, fmt.Sprintf("error fetching policy details from DSCC %s. Please verify the connectivity with DSCC.", credentials.DSCCZone))
@@ -933,7 +941,7 @@ func deleteBucketAccess(ctx context.Context, userName, policyName, bucketName st
 	}
 
 	if exist {
-		log.Info(fmt.Sprintf("Deleting S3 access policy %s", userName))
+		log.Info(fmt.Sprintf("Deleting S3 access policy %s", utils.MaskName(policyName)))
 		task, err := p.DeleteS3AccessPolicy()
 		if task == nil && err != nil {
 			log.Error(err, "error while deleting s3 access policy.")
@@ -949,7 +957,7 @@ func deleteBucketAccess(ctx context.Context, userName, policyName, bucketName st
 
 		}
 	} else {
-		log.Info(fmt.Sprintf("S3 access policy %s, doesn't exist in DSCC", userName))
+		log.Info(fmt.Sprintf("S3 access policy %s, doesn't exist in DSCC", utils.MaskName(policyName)))
 	}
 	return nil
 
@@ -957,7 +965,8 @@ func deleteBucketAccess(ctx context.Context, userName, policyName, bucketName st
 
 // Fetches a fresh bearer token to access DSCC, through GLCP
 func getAccessToken(credentials *utils.IAMCredentials, log *logr.Logger) (string, error) {
-	ts := iam.NewTokenService(credentials.GLCPCommonCloud, credentials.GLCPUser, credentials.GLCPUserSecretKey, credentials.Proxy, credentials.OnPremCloudCA, log)
+	ts := iam.NewTokenService(credentials.GLCPCommonCloud, credentials.GLCPUser, credentials.GLCPUserSecretKey, credentials.GLCPWorkspaceId,
+		credentials.Proxy, credentials.OnPremCloudCA, log)
 	token, err := ts.GetAccessToken()
 	return token, err
 }
